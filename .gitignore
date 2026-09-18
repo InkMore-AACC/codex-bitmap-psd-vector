@@ -1,0 +1,22 @@
+node_modules/
+dist/
+data/
+.runtime/
+/models/
+/vendor/
+test-output/
+*.log
+__pycache__/
+.env
+*.pyc
+
+# Machine-local configuration and private development artifacts
+plugins/layer-canvas/.mcp.json
+docs/evidence/
+docs/agents/
+reading-zh/
+.env.*
+!.env.example
+*.pem
+*.key
+playwright-report/

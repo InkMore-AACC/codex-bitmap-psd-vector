@@ -1,0 +1,8 @@
+# Tested in isolated Windows Python 3.12; Torch/CUDA installed separately by setup.
+numpy>=1.26,<3
+pillow>=10,<13
+scipy>=1.11,<2
+scikit-image>=0.22,<0.27
+opencv-python-headless>=4.9,<6
+onnxruntime>=1.18,<2
+requests>=2.31,<3

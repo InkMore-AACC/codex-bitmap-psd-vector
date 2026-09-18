@@ -1,0 +1,100 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createServer } from 'node:net';
+import { mkdir, writeFile, readFile } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import crypto from 'node:crypto';
+import sharp from 'sharp';
+import { readPsd, writePsdBuffer, initializeCanvas } from 'ag-psd';
+import { createCanvas, ImageData } from '@napi-rs/canvas';
+
+initializeCanvas((width, height) => createCanvas(width, height) as any, (width, height) => new ImageData(width, height) as any);
+
+test('real backend starts hidden, isolates tasks, imports PNG, claims and applies actual PSD, and branches frozen outputs without overwriting new edits', async () => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const data = path.join(root, 'test-output', `bridge-e2e-${crypto.randomUUID()}`);
+  const probe = createServer();
+  await new Promise<void>(resolve => probe.listen(0, '127.0.0.1', resolve));
+  const address = probe.address(); assert(address && typeof address === 'object');
+  const port = address.port;
+  await new Promise<void>(resolve => probe.close(() => resolve()));
+  const saved = { data: process.env.LAYER_CANVAS_DATA, port: process.env.LAYER_CANVAS_PORT, task: process.env.CODEX_THREAD_ID };
+  const taskId = `bridge_test_${crypto.randomUUID()}`;
+  process.env.LAYER_CANVAS_DATA = data;
+  process.env.LAYER_CANVAS_PORT = String(port);
+  process.env.CODEX_THREAD_ID = taskId;
+  let pid: number | undefined;
+  try {
+    const { CanvasClient, ensureService } = await import('./client.js');
+    const service = await ensureService(); pid = service.pid;
+    assert.equal(service.port, port);
+    assert(service.bridgeToken);
+    const client = new CanvasClient();
+    const opened = await client.open(taskId) as any;
+    assert.equal(opened.dispatch.mode, 'desktop-app-tools');
+    assert(!JSON.stringify(opened).includes(service.bridgeToken!));
+    const doc = await client.document(taskId);
+    assert.equal(doc.images.length, 0);
+    await assert.rejects(() => client.document('another_task'), /当前/);
+    const source = path.join(data, 'actual-fixture.png');
+    await mkdir(data, { recursive: true });
+    await sharp({ create: { width: 32, height: 24, channels: 4, background: { r: 120, g: 40, b: 210, alpha: .8 } } }).png().toFile(source);
+    const imported = await client.request<any>(`/api/document/${doc.id}/import-path`, 'POST', { taskId, path: source });
+    const image = imported.images[0];
+    const job = await client.request<any>(`/api/document/${doc.id}/jobs`, 'POST', { type: 'revise', imageId: image.id });
+    assert.equal(job.status, 'waiting_codex');
+    const waiting = await client.wait(taskId, 0) as any;
+    assert.equal(waiting.jobs[0].id, job.id);
+    const packet = await client.packet(taskId, job.id);
+    assert.equal(packet.image.id, image.id);
+    assert((await readFile(packet.sourcePath)).length > 0);
+    await client.mutateJob(taskId, job.id, 'claim');
+    await assert.rejects(() => client.mutateJob(taskId, job.id, 'claim'), /409/);
+    const result = await client.mutateJob(taskId, job.id, 'apply', { baseVersion: job.version, layers: [{ name: '验证图层', path: source, width: 32, height: 24, x: 0, y: 0, kind: 'raster' }] }) as any;
+    assert.equal(result.job.status, 'completed');
+    assert.equal(result.document.images.at(-1).status, 'layered');
+    assert.equal(result.document.images.at(-1).layers[0].name, '验证图层');
+    const psdResponse = await fetch(`http://127.0.0.1:${port}/api/document/${doc.id}/export?imageId=${result.job.result.imageId}&format=psd`, { headers: { 'X-Canvas-Token': service.token } });
+    assert.equal(psdResponse.status, 200, psdResponse.ok ? undefined : await psdResponse.text());
+    const psdBytes = Buffer.from(await psdResponse.arrayBuffer());
+    assert.equal(psdBytes.subarray(0, 4).toString(), '8BPS');
+    const psdPath = path.join(data, 'roundtrip.psd');
+    const smallPsd = readPsd(psdBytes, { useImageData: true });
+    assert.equal(smallPsd.children?.[0].name, '验证图层');
+    const largeRaw = await sharp(source).resize(2048, 1536).ensureAlpha().raw().toBuffer();
+    const largeData = { width: 2048, height: 1536, data: new Uint8ClampedArray(largeRaw) };
+    const enlargedPsd = writePsdBuffer({ width: 2048, height: 1536, imageData: largeData, children: [{ name: '验证图层', left: 0, top: 0, right: 2048, bottom: 1536, imageData: largeData }] });
+    await writeFile(psdPath, enlargedPsd);
+    const external = await client.request<any>(`/api/document/${doc.id}/jobs`, 'POST', { type: 'photoshop', imageId: image.id });
+    const handoff = await client.packet(taskId, external.id);
+    assert.match(handoff.prompt, /真实分层 PSD/);
+    await client.mutateJob(taskId, external.id, 'claim');
+    const returned = await client.mutateJob(taskId, external.id, 'apply', { baseVersion: external.version, artifactPath: psdPath }) as any;
+    assert.equal(returned.job.status, 'completed');
+    assert.equal(returned.document.images.at(-1).layers[0].name, '验证图层');
+    assert.equal(returned.document.images.at(-1).width, 2048);
+    assert.equal(returned.document.images.at(-1).height, 1536);
+    assert.equal(returned.document.images.at(-1).layers[0].width, 2048);
+    const returnedPsdResponse = await fetch(`http://127.0.0.1:${port}/api/document/${doc.id}/export?imageId=${returned.job.result.imageId}&format=psd`, { headers: { 'X-Canvas-Token': service.token } });
+    assert.equal(returnedPsdResponse.status, 200, returnedPsdResponse.ok ? undefined : await returnedPsdResponse.text());
+    const roundtrip = readPsd(Buffer.from(await returnedPsdResponse.arrayBuffer()), { useImageData: true });
+    assert.equal(roundtrip.width, 2048); assert.equal(roundtrip.height, 1536);
+    assert.equal(roundtrip.children?.[0].name, '验证图层');
+    const stale = await client.request<any>(`/api/document/${doc.id}/jobs`, 'POST', { type: 'revise', imageId: image.id });
+    const edited = await client.document(taskId);
+    edited.images[0].opinion = '用户在处理中新增的意见';
+    await client.request(`/api/document/${doc.id}`, 'PUT', { document: edited, expectedRevision: edited.revision });
+    const branched:any=await client.mutateJob(taskId, stale.id, 'apply', { baseVersion: stale.version, layers: [{ name: '独立旧版结果', path: source, width: 32, height: 24 }] });
+    assert.equal(branched.job.status,'completed');assert.equal(branched.document.images.at(-1).basedOnOlderVersion,true);assert.equal(branched.document.images.at(-1).parentId,image.id);
+    const privateDenied = await fetch(`http://127.0.0.1:${port}/api/jobs?taskId=${encodeURIComponent(taskId)}`, { headers: { 'X-Canvas-Token': service.token } });
+    assert.equal(privateDenied.status, 403);
+    const final = await client.document(taskId);
+    assert.equal(final.images[0].opinion, '用户在处理中新增的意见');
+  } finally {
+    if (pid) { try { process.kill(pid); } catch {} }
+    for (const [key, value] of Object.entries({ LAYER_CANVAS_DATA: saved.data, LAYER_CANVAS_PORT: saved.port, CODEX_THREAD_ID: saved.task })) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
+});
