@@ -54,12 +54,16 @@ test('canvas interactions preserve local annotations, drag nodes at zoom, and pe
   let conflictDuringSave = false;
   let uiJobs: any[] = [];
   let vectorClicks = 0;
+  let viewPuts = 0;
+  let savedView = { x: 140, y: 90, scale: .75, selectedImageId: 'result' as string | null };
   await page.route('**/api/**', async route => {
     const req = route.request(), path = new URL(req.url()).pathname;
+    if(path.endsWith('/view-state')){if(req.method()==='PUT'){savedView=req.postDataJSON();viewPuts++;return route.fulfill({json:savedView});}return route.fulfill({json:savedView});}
     if(path.endsWith('/reference'))return route.fulfill({json:{url:svg,complete:true}});
     if(path==='/api/adobe/probe')return route.fulfill({json:{status:'partial',channels:[{name:'MCP',status:'success',message:'工具服务已连接'},{name:'Windows 脚本',status:'failed',message:'请先打开软件'}],technical:'fixture-details-only'}});
     if(path==='/api/adobe')return route.fulfill({json:{photoshop:{mode:'auto',installed:true},illustrator:{mode:'auto',url:'http://localhost:18412/v1/mcp',hasToken:false}}});
-    if (path === '/api/settings') return route.fulfill({ json: { recraftConfigured: false, api302Configured: false, models: { segmentation: true, supersvg: true, adavec: false } } });
+    if (path === '/api/cutout-defaults') return route.fulfill({json:req.postDataJSON()});
+    if (path === '/api/settings') return route.fulfill({ json: { recraftConfigured: false, api302Configured: false, models: { segmentation: true, birefnet: true, lucida: true } } });
     if (path.endsWith('/jobs') && req.method() === 'POST') {
       vectorClicks++;
       const body=req.postDataJSON();
@@ -81,7 +85,10 @@ test('canvas interactions preserve local annotations, drag nodes at zoom, and pe
     await page.goto(`${baseUrl}?taskId=ui-fixture#token=test-only`);
     await page.locator('[data-image-id="source"]').waitFor();
     const source = page.locator('[data-image-id="source"]');
-    assert.equal(await page.locator('.annotations').count(),0);
+    await page.waitForFunction(()=>document.querySelector<HTMLSelectElement>('select[aria-label="当前图片"]')?.value==='result');
+    assert.equal(await page.getByRole('button',{name:'75%',exact:true}).count(),1);
+    assert.equal(await page.getByRole('status').getByText('已恢复 2 个节点',{exact:true}).count(),1);
+    assert.equal(await page.locator('[data-image-id="source"] .annotations').count(),0);
     await page.getByRole('combobox',{name:'当前图片',exact:true}).selectOption('source');
     const first = (await source.boundingBox())!;
     const canvas = (await page.locator('.canvas').boundingBox())!;
@@ -118,7 +125,7 @@ test('canvas interactions preserve local annotations, drag nodes at zoom, and pe
     // Drag image pixels, not the title.
     await page.mouse.move(first.x + 100, first.y + 100); await page.mouse.down(); await page.mouse.move(first.x + 160, first.y + 130, { steps: 5 }); await page.mouse.up();
     await flush();
-    assert.ok(Math.abs(saved.images[0].x - 200) < .01); assert.ok(Math.abs(saved.images[0].y - 150) < .01);
+    assert.ok(Math.abs(saved.images[0].x - 180) < .01); assert.ok(Math.abs(saved.images[0].y - 140) < .01);
     assert.deepEqual(saved.images[0].annotations[0].points, coordinates);
     assert.ok(saved.images.some(i => i.id === 'late-result'), 'completed output must survive a stale local save');
     assert.notEqual(await page.locator('.node-connections path[data-child="result"]').getAttribute('d'), oldPath);
@@ -162,7 +169,19 @@ test('canvas interactions preserve local annotations, drag nodes at zoom, and pe
     assert.deepEqual(saved.images[0].annotations[0].points, coordinates);
     await page.getByRole('button', { name: 'PSD 分层方案设置', exact: true }).click();
     assert.equal(await page.getByRole('button', { name: /方案 1 ·/ }).count(), 0);
-    await page.getByRole('button', { name: /方案 3 ·/ }).click();
+    await page.getByRole('button', { name: /Lucida v7 精细预览 \+ Codex 重建/ }).click();
+    const resolution=page.getByRole('spinbutton',{name:'Lucida v7 精细抠图 处理分辨率'});
+    assert.match(await resolution.getAttribute('title')||'',/增大.*减小/);
+    await resolution.fill('1536');
+    await page.getByRole('checkbox',{name:'Lucida v7 精细抠图 去除边缘背景染色'}).check();
+    await page.getByRole('button',{name:'保存并设为默认',exact:true}).click();
+    await page.getByText('已保存为默认',{exact:true}).waitFor();
+    assert.equal(saved.settings.psdMode,5);assert.equal(saved.settings.cutoutOptions?.lucida.resolution,1536);
+    await page.locator('.settings-body').evaluate(el=>el.scrollTop=0);
+    await page.screenshot({path:path.join(output,'fine-matting-settings.png')});
+    await page.getByRole('button', { name: /Codex 框规划 \+ 生成重建/ }).click();
+    await page.getByRole('button',{name:'保存并设为默认',exact:true}).click();
+    await page.getByText('已保存为默认',{exact:true}).waitFor();
     await page.getByRole('button', { name: '矢量化', exact: true }).click();
     assert.equal(await page.getByRole('button', { name: /SuperSVG|AdaVec/ }).count(), 0);
     await page.getByRole('combobox',{name:'Vectorizer.com 网页操作方式'}).selectOption('codex');await flush();assert.equal(saved.settings.vectorizerComMode,'codex');
@@ -176,9 +195,12 @@ test('canvas interactions preserve local annotations, drag nodes at zoom, and pe
     await ps.getByText('查看详情',{exact:true}).click();assert.equal(await ps.locator('pre').isVisible(),true);
     await page.getByRole('button', { name: '完成', exact: true }).click(); await flush();
     assert.equal(saved.settings.psdMode, 3); assert.equal(saved.settings.vectorEngine, 'vectorizer302');
-    // Reload round-trip uses the saved mock document, never the user's active canvas.
+    // Reload round-trip restores the same selected node and viewport from a separate view-state file.
+    await page.waitForFunction(()=>document.querySelector<HTMLSelectElement>('select[aria-label="当前图片"]')?.value==='source');await page.waitForTimeout(500);assert.ok(viewPuts>0);
+    const scaleBeforeReload=await page.locator('.zoom-controls button').nth(1).textContent();
     await page.reload(); await source.waitFor();
-    assert.equal(await page.locator('.annotations').count(),0);await page.getByRole('combobox',{name:'当前图片',exact:true}).selectOption('source');
+    await page.waitForFunction(()=>document.querySelector<HTMLSelectElement>('select[aria-label="当前图片"]')?.value==='source');
+    assert.equal(await page.locator('.zoom-controls button').nth(1).textContent(),scaleBeforeReload);
     assert.equal(await source.locator('.annotations polyline').getAttribute('opacity'),'0.4');
     assert.equal(await page.locator('.node-connections path[data-child]').count(), 2);
     assert.equal(await page.locator('.node-connections path[data-child]').first().getAttribute('stroke-width'),'9');
@@ -249,6 +271,70 @@ test('canvas interactions preserve local annotations, drag nodes at zoom, and pe
     await page.getByRole('button',{name:'撤销',exact:true}).click();await flush();assert.equal(saved.images.length,beforeDelete.length);
     await page.getByRole('combobox',{name:'当前图片',exact:true}).selectOption('result');
     await page.locator('.whole-image').click();
+    // Pre-layer frame editing is independent from the bitmap and image-local annotations.
+    const framed=saved.images.find(i=>i.id==='result')!;framed.status='preview';
+    framed.layers[0].preview=true;framed.layers[0].frame={x:20,y:30,width:100,height:90};
+    framed.annotations=[{id:'frame-mark',layerId:'layer-1',type:'arrow',points:[-10,20,60,70],text:'保留光晕',color:'#ff6600'}];saved.revision++;
+    await page.reload();await page.getByRole('combobox',{name:'当前图片',exact:true}).selectOption('result');
+    await page.getByRole('button',{name:'适应',exact:true}).click();
+    await page.locator('.layer-title').getByText('主体',{exact:true}).click();
+    assert.equal(await page.locator('.frame-handle').count(),8);
+    const beforeFrame=structuredClone(saved.images.find(i=>i.id==='result')!);
+    const frameBox=(await page.getByRole('button',{name:'调整图层画幅 se',exact:true}).boundingBox())!;
+    const zoomScale=(await page.locator('[data-image-id="result"]').boundingBox())!.width/200;
+    await page.mouse.move(frameBox.x+frameBox.width/2,frameBox.y+frameBox.height/2);await page.mouse.down();
+    await page.mouse.move(frameBox.x+frameBox.width/2+24,frameBox.y+frameBox.height/2+18,{steps:4});await page.mouse.up();await flush();
+    const afterFrame=saved.images.find(i=>i.id==='result')!;
+    assert.deepEqual(afterFrame.layers[0].frame,{x:20,y:30,width:100+Math.round(24/zoomScale),height:90+Math.round(18/zoomScale)});
+    assert.deepEqual(afterFrame.annotations,beforeFrame.annotations);
+    assert.deepEqual([afterFrame.layers[0].x,afterFrame.layers[0].y,afterFrame.layers[0].width,afterFrame.layers[0].height,afterFrame.layers[0].url],[beforeFrame.layers[0].x,beforeFrame.layers[0].y,beforeFrame.layers[0].width,beforeFrame.layers[0].height,beforeFrame.layers[0].url]);
+    const changedFrame=structuredClone(afterFrame.layers[0].frame);
+    await page.getByRole('button',{name:'撤销',exact:true}).click();await flush();assert.deepEqual(saved.images.find(i=>i.id==='result')!.layers[0].frame,beforeFrame.layers[0].frame);
+    await page.getByRole('button',{name:'重做',exact:true}).click();await flush();assert.deepEqual(saved.images.find(i=>i.id==='result')!.layers[0].frame,changedFrame);
+    await page.reload();await page.locator('.layer-title').getByText('主体',{exact:true}).click();assert.deepEqual(saved.images.find(i=>i.id==='result')!.layers[0].frame,changedFrame);
+    await page.screenshot({path:path.join(output,'layer-frame.png')});
+    await page.getByRole('button',{name:'恢复建议画幅',exact:true}).click();await flush();assert.deepEqual(saved.images.find(i=>i.id==='result')!.layers[0].frame,{x:0,y:0,width:200,height:200});
+    await page.getByRole('button',{name:'箭头 A',exact:true}).click();assert.equal(await page.locator('.frame-handle').count(),0);
+    await page.getByRole('button',{name:'选择 V',exact:true}).click();
+    await page.locator('.whole-image').click();assert.equal(await page.locator('.layer-frame').count(),0);
+    // Add an annotation-only layer to a local preview: no job, bitmap or model is created.
+    const jobsBeforePlanning=vectorClicks;
+    await page.getByRole('button',{name:'新建图层',exact:true}).click();await flush();
+    const manual=saved.images.find(i=>i.id==='result')!.layers.at(-1)!;
+    assert.equal(manual.kind,'plan');assert.equal(manual.url,undefined);assert.equal(manual.disposition,'rebuild');
+    assert.equal(await page.locator('.planning-source').count(),1);assert.equal(await page.locator('.frame-handle').count(),8);
+    await page.getByRole('textbox',{name:'图层名称',exact:true}).fill('发光装饰');await flush();
+    await page.getByRole('textbox',{name:'图层修改意见',exact:true}).fill('仅重建右侧装饰与光晕');await flush();
+    const newFrame=(await page.getByRole('button',{name:'调整图层画幅 se',exact:true}).boundingBox())!;
+    await page.mouse.move(newFrame.x+newFrame.width/2,newFrame.y+newFrame.height/2);await page.mouse.down();
+    await page.mouse.move(newFrame.x+newFrame.width/2+20,newFrame.y+newFrame.height/2+12,{steps:4});await page.mouse.up();await flush();
+    const editedPlan=structuredClone(saved.images.find(i=>i.id==='result')!.layers.at(-1)!);
+    assert.notDeepEqual(editedPlan.frame,manual.frame);assert.equal(editedPlan.name,'发光装饰');
+    assert.deepEqual(saved.images.find(i=>i.id==='result')!.annotations,beforeFrame.annotations);
+    await page.locator('.whole-image').click();assert.equal(await page.locator('.layer-frame').count(),1);
+    await page.getByRole('button',{name:'选择规划图层 发光装饰',exact:true}).click();
+    assert.equal(await page.getByRole('textbox',{name:'图层名称',exact:true}).inputValue(),'发光装饰');
+    await page.getByRole('button',{name:'删除预分层图层',exact:true}).click();await flush();
+    assert(!saved.images.find(i=>i.id==='result')!.layers.some(l=>l.id===manual.id));
+    await page.getByRole('button',{name:'撤销',exact:true}).click();await flush();
+    assert.deepEqual(saved.images.find(i=>i.id==='result')!.layers.at(-1),editedPlan);
+    await page.reload();await page.locator('.layer-title').getByText('发光装饰',{exact:true}).click();
+    assert.equal(await page.getByRole('textbox',{name:'图层修改意见',exact:true}).inputValue(),'仅重建右侧装饰与光晕');
+    assert.equal(vectorClicks,jobsBeforePlanning,'planning edits must not submit generation');
+    assert.equal(await page.locator('img:not([src]), img[src=""]').count(),0);
+    // Oversize frames warn without disabling reconstruction or changing saved geometry.
+    saved.images.find(i=>i.id==='result')!.layers.at(-1)!.frame={x:-10,y:20,width:1242,height:2688};saved.revision++;
+    await page.reload();await page.locator('.layer-title').getByText('发光装饰',{exact:true}).click();
+    assert.match(await page.locator('.generation-hint').innerText(),/155万像素/);
+    assert.match(await page.locator('.generation-hint').innerText(),/预计生成/);
+    assert.deepEqual(saved.images.find(i=>i.id==='result')!.layers.at(-1)!.frame,{x:-10,y:20,width:1242,height:2688});
+    assert.equal(vectorClicks,jobsBeforePlanning);
+    // A pure box plan keeps the clean source visible and all named boxes inspectable.
+    saved.images.find(i=>i.id==='result')!.layers=[editedPlan];saved.revision++;
+    await page.reload();await page.locator('.whole-image').click();
+    assert.equal(await page.locator('.planning-source').count(),1);assert.equal(await page.locator('.layer-frame').count(),1);
+    await page.screenshot({path:path.join(output,'box-planning.png')});
+    assert.deepEqual(errors,[]);
     conflictDuringSave = true;
     await page.getByRole('textbox', { name: '总图修改意见', exact: true }).fill('保留我的本地意见');
     await page.getByRole('button', { name: '下载未保存草稿', exact: true }).waitFor();

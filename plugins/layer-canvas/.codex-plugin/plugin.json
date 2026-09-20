@@ -10,7 +10,7 @@
   "interface": {
     "displayName": "分层画布",
     "shortDescription": "多图标注、PSD 分层、自动网页 / 官方 API / 302 矢量化",
-    "longDescription": "当前 Codex 对话独立画布；两种 PSD 分层方案，Vectorizer.com 自动网页、Vectorizer.AI 官方 API、Recraft 官方 API 和 302.AI 转接可选。支持 PSD 导入导出及 PS/AI 最终交接。",
+    "longDescription": "当前 Codex 对话独立画布；四种 PSD 分层流程，含 BiRefNet HR / Lucida v7 直接精细抠图及参数设置，Vectorizer.com 自动网页、Vectorizer.AI 官方 API、Recraft 官方 API 和 302.AI 转接可选。支持 PSD 导入导出及 PS/AI 最终交接。",
     "developerName": "InkMore",
     "category": "Productivity",
     "capabilities": [

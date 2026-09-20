@@ -34,14 +34,14 @@ test('node deletion persists, cancels only its jobs, supports undo and isolates 
 });
 
 test('new settings reject retired engines and migrate legacy settings on read',async()=>{
- const {d}=await fixture();assert.equal(d.settings.psdMode,2);
+ const {d}=await fixture();assert.equal(d.settings.psdMode,4);
  const {documentSchema,jobSchema}=await import('../server/validation.js');
  assert.throws(()=>jobSchema.parse({imageId:d.images[0].id,type:'layer',mode:1}));
  d.settings.vectorEngine='vectorizer302';d.settings.vectorOptions={supersvg:{pathNum:512},adavec:{segments:600}};
  assert.equal(documentSchema.parse(d).settings.vectorEngine,'vectorizer302');
  assert.throws(()=>jobSchema.parse({imageId:d.images[0].id,type:'vectorize',engine:'adavec'}));
- d.settings.vectorOptions.supersvg.pathNum=100000;assert.throws(()=>documentSchema.parse(d));
- const {dir,load}=await import('../server/store.js');d.settings.psdMode=1;d.settings.vectorEngine='adavec';fs.writeFileSync(path.join(dir(d.id),'document.json'),JSON.stringify(d));assert.equal(load(d.id).settings.psdMode,2);assert.equal(load(d.id).settings.vectorEngine,'vectorizerCom');
+ d.settings.vectorOptions.supersvg.pathNum=100000;assert.equal('vectorOptions' in documentSchema.parse(d).settings,false);
+ const {dir,load}=await import('../server/store.js');d.settings.psdMode=1;d.settings.vectorEngine='adavec';fs.writeFileSync(path.join(dir(d.id),'document.json'),JSON.stringify(d));assert.equal(load(d.id).settings.psdMode,2);assert.equal(load(d.id).settings.vectorEngine,'vectorizerCom');assert.equal('vectorOptions' in load(d.id).settings,false);assert.equal(JSON.parse(fs.readFileSync(path.join(dir(d.id),'document.json'),'utf8')).settings.vectorEngine,'adavec');
 });
 
 test('outside arrow coordinates and brush masks stay separate from original pixels',async()=>{
@@ -52,8 +52,8 @@ test('outside arrow coordinates and brush masks stay separate from original pixe
  const p=await api(`/api/jobs/${j.id}/packet?taskId=${d.taskId}`,undefined,'GET',true);
  assert.deepEqual(p.coordinateAnnotations[0].target,[25,30]);assert.deepEqual(p.coordinateAnnotations[0].points,[-120,-40,25,30]);assert.equal(p.annotationContract.artworkContainsMarks,false);
  assert.equal(loaded.images[0].annotations[1].opacity,.1);
- const raw=await sharp(p.coordinateAnnotations[1].maskPath).raw().toBuffer();assert.equal(raw[10*100+15],255);assert.equal(raw[50*100+50],0);
- const actual=await sharp(p.sourcePath).raw().toBuffer();assert.deepEqual([...actual.subarray(0,4)],[170,102,119,255]);
+ const raw=await sharp(fs.readFileSync(p.coordinateAnnotations[1].maskPath)).raw().toBuffer();assert.equal(raw[10*100+15],255);assert.equal(raw[50*100+50],0);
+ const actual=await sharp(fs.readFileSync(p.sourcePath)).raw().toBuffer();assert.deepEqual([...actual.subarray(0,4)],[170,102,119,255]);
 });
 
 test('formal outputs branch from frozen source and preserve newer edits and annotation bindings',async()=>{

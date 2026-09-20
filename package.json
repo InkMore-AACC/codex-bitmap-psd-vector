@@ -9,7 +9,9 @@
     "start": "tsx server/index.ts",
     "test": "tsx --test tests/*.test.ts bridge/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "mcp": "tsx bridge/mcp.ts"
+    "mcp": "tsx bridge/mcp.ts",
+    "format": "prettier --write server web shared",
+    "format:check": "prettier --check server web shared"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.0",
@@ -21,7 +23,7 @@
     "playwright": "^1.63.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "sharp": "^0.34.0",
+    "sharp": "^0.35.4",
     "zod": "^3.25.0"
   },
   "devDependencies": {
@@ -32,6 +34,7 @@
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "prettier": "3.9.8",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0",
     "vite": "^7.1.0"

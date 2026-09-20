@@ -14,7 +14,7 @@ test('stdio MCP initializes and discovers task-bound canvas tools without starti
   try {
     await client.connect(transport);
     const listing = await client.listTools();
-    assert.equal(listing.tools.length, 11);
+    assert.equal(listing.tools.length, 12);
     for (const tool of listing.tools) assert(tool.inputSchema.required?.includes('taskId'));
     assert(listing.tools.some(tool => tool.name === 'canvas_apply_plan'));
     assert(listing.tools.some(tool => tool.name === 'canvas_web_vector'));
@@ -32,6 +32,6 @@ test('configured plugin MCP starts outside the workspace with Windows-safe ESM i
   const client = new Client({ name: 'installed-configuration-test', version: '1.0.0' });
   try {
     await client.connect(transport);
-    assert.equal((await client.listTools()).tools.length, 11);
+    assert.equal((await client.listTools()).tools.length, 12);
   } finally { await client.close(); }
 });

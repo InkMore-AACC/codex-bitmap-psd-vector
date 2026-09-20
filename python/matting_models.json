@@ -1,0 +1,23 @@
+{
+  "birefnet": {
+    "repo": "ZhengPeng7/BiRefNet_HR-matting",
+    "revision": "5d6b6f8adcb5b417c871b1d84ceaae9871355b7f",
+    "files": {
+      "BiRefNet_config.py": {"gitSha1":"37c8ac58bec2f52dac34204978a7b61b69e3da76"},
+      "birefnet.py": {"gitSha1":"237ac4e21c0999b007381742a387ec1276e6c684"},
+      "config.json": {"gitSha1":"d2df8d136bf89699c8ca429a8e542de1cbcfd98e"},
+      "model.safetensors": {"sha256":"a5a4de698739ea5e0e8bbab28e1b293dde95092b87a442d566cbc585c53cef55"}
+    }
+  },
+  "lucida": {
+    "repo": "egeorcun/lucida",
+    "revision": "6cbedc9722652dc9a3df91dd871f0c4f3334e922",
+    "version": "v7",
+    "files": {
+      "BiRefNet_config.py": {"gitSha1":"37c8ac58bec2f52dac34204978a7b61b69e3da76"},
+      "birefnet.py": {"gitSha1":"237ac4e21c0999b007381742a387ec1276e6c684"},
+      "config.json": {"gitSha1":"bb8c94ae7099086ac2cd5e8b5bcda7434f1c784d"},
+      "model.safetensors": {"sha256":"2f1aa6913426537d4b93dd5f7138ae5c6664e99abda98c95f3d5b9101283e7d5"}
+    }
+  }
+}

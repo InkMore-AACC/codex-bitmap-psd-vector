@@ -9,6 +9,7 @@ process.env.LAYER_CANVAS_DATA=path.resolve('test-output','long-path-'+crypto.ran
 const {getByTask,writeAsset,save,uid}=await import('../server/store.js');
 const {webVectorPacket}=await import('../server/external-vector.js');
 const {annotationPacket}=await import('../server/annotations.js');
+const {renderImage,renderStyledLayer,exportPsd,importImage}=await import('../server/media.js');
 
 test('web uploads and annotation masks work beyond Windows legacy path length',async()=>{
   const d=getByTask('long_path_fixture');
@@ -22,4 +23,10 @@ test('web uploads and annotation masks work beyond Windows legacy path length',a
   const annotations=await annotationPacket(image,packet.outputDirectory);
   assert.ok(annotations[0].maskPath!.length>260);
   assert.equal((await sharp(fs.readFileSync(annotations[0].maskPath!)).metadata()).width,20);
+  assert.equal((await sharp(await renderImage(d.id,image)).metadata()).width,20);
+  image.layers=[{id:uid(),name:'主体',url:source,x:0,y:0,width:20,height:20,visible:true,opacity:1,opinion:'',disposition:'keep',kind:'raster',psdStyle:{stroke:{color:'#0000ff',size:1}}}];
+  assert.equal((await sharp(await renderImage(d.id,image)).metadata()).width,20);
+  assert.equal((await sharp(await renderStyledLayer(d.id,image.layers[0],20,20)).metadata()).width,20);
+  const imported=await importImage(d,await exportPsd(d.id,image),'roundtrip.psd');
+  assert.equal(imported.layers.length,1);assert.equal(imported.width,20);
 });

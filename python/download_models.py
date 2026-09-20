@@ -1,6 +1,6 @@
 """Verified, repeatable model setup; mainland mirror first, upstream fallback."""
 import concurrent.futures
-import hashlib
+from download_utils import file_hexdigest
 import json
 from pathlib import Path
 import urllib.request
@@ -8,7 +8,6 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[1]
 SPECS = [
     ('u2netp.onnx', None, '8e83ca70e441ab06c318d82300c84806'),
-    ('isnet-general-use.onnx', None, 'fc16ebd8b0c10d971d3513d564d01e29'),
 ]
 
 def download(spec):
@@ -17,14 +16,10 @@ def download(spec):
     target.parent.mkdir(exist_ok=True)
     def valid(path):
         if not path.exists(): return False
-        return hashlib.file_digest(path.open('rb'), 'sha256' if sha else 'md5').hexdigest() == (sha or md5)
-    sources = ([f'https://hf-mirror.com/JTUplayer/SuperSVG/resolve/main/weights/{name}',
-                f'https://huggingface.co/JTUplayer/SuperSVG/resolve/main/weights/{name}'] if sha else
-               [f'https://hf-mirror.com/briaai/RMBG-1.4/resolve/main/{name}',
-                f'https://github.com/danielgatis/rembg/releases/download/v0.0.0/{name}'])
-    # No trustworthy mainland upstream for these rembg exports is currently known;
-    # try known rembg mirror repository, and require original author's digest.
-    if md5: sources[0] = f'https://hf-mirror.com/nekoshisan/rembg/resolve/main/{name}'
+        return file_hexdigest(path, 'sha256' if sha else 'md5') == (sha or md5)
+    # Mirror data is accepted only if it matches the upstream digest.
+    sources = [f'https://hf-mirror.com/nekoshisan/rembg/resolve/main/{name}',
+               f'https://github.com/danielgatis/rembg/releases/download/v0.0.0/{name}']
     source = 'existing-verified'
     manifest = ROOT / 'models' / 'manifest.json'
     if manifest.exists():
@@ -45,7 +40,7 @@ def download(spec):
             except Exception as exc:
                 print(f'{name}: source failed: {exc}', flush=True)
         else: raise RuntimeError(f'No verified download succeeded for {name}')
-    return {'file': name, 'bytes': target.stat().st_size, 'sha256': hashlib.file_digest(target.open('rb'), 'sha256').hexdigest(), 'source': source}
+    return {'file': name, 'bytes': target.stat().st_size, 'sha256': file_hexdigest(target), 'source': source}
 
 if __name__ == '__main__':
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:

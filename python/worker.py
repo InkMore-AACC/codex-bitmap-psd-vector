@@ -11,41 +11,46 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 MODELS = ROOT / 'models'
+from matting import options_for, fine_mask, adjust_alpha, decontaminate
 
 def status():
-    weights = {n: (MODELS / n).is_file() for n in ['u2netp.onnx', 'isnet-general-use.onnx']}
-    return {'python': sys.version.split()[0], 'weights': weights,
-            'segmentation': weights['u2netp.onnx'] and importlib.util.find_spec('onnxruntime') is not None,
-            'fineSegmentation': weights['isnet-general-use.onnx'] and importlib.util.find_spec('onnxruntime') is not None}
+    weights = {n: (MODELS / n).is_file() for n in ['u2netp.onnx']}
+    deps = all(importlib.util.find_spec(n) is not None for n in ['torch','transformers','timm','kornia','einops','safetensors'])
+    fine_ready = {n: deps and all((MODELS/n/f).is_file() for f in ['model.safetensors','birefnet.py','BiRefNet_config.py','config.json','verified.json']) for n in ['birefnet','lucida']}
+    return {**fine_ready, 'python': sys.version.split()[0], 'weights': weights,
+            'segmentation': weights['u2netp.onnx'] and importlib.util.find_spec('onnxruntime') is not None}
 
 
 _SESSIONS = {}
 
-def model_mask(image, fine=False):
+def model_mask(image, threads=8):
     import numpy as np
     import onnxruntime as ort
     from PIL import Image
-    name = 'isnet-general-use.onnx' if fine else 'u2netp.onnx'
-    if name not in _SESSIONS:
+    name = 'u2netp.onnx'
+    key=(name,threads)
+    if key not in _SESSIONS:
         options = ort.SessionOptions()
-        options.intra_op_num_threads = min(8, os.cpu_count() or 4)
+        options.intra_op_num_threads = min(threads, os.cpu_count() or 4)
         options.inter_op_num_threads = 1
-        _SESSIONS[name] = ort.InferenceSession(str(MODELS / name), options, providers=['CPUExecutionProvider'])
-    session = _SESSIONS[name]
-    size = 1024 if fine else 320
+        _SESSIONS[key] = ort.InferenceSession(str(MODELS / name), options, providers=['CPUExecutionProvider'])
+    session = _SESSIONS[key]
+    size = 320
     arr = np.asarray(image.convert('RGB').resize((size, size), Image.Resampling.LANCZOS), dtype=np.float32)
     arr = arr / max(float(arr.max()), 1)
-    mean = [0.5]*3 if fine else [0.485, 0.456, 0.406]
-    std = [1.0]*3 if fine else [0.229, 0.224, 0.225]
+    mean = [0.485, 0.456, 0.406]
+    std = [0.229, 0.224, 0.225]
     arr = ((arr - np.asarray(mean, dtype=np.float32)) / np.asarray(std, dtype=np.float32)).transpose(2,0,1)[None]
     pred = session.run(None, {session.get_inputs()[0].name: arr})[0][0,0]
     pred = (pred-pred.min()) / max(float(pred.max()-pred.min()), 1e-8)
     return Image.fromarray((pred*255).astype('uint8')).resize(image.size, Image.Resampling.LANCZOS)
 
-def segment(input_path, output_dir, boxes_file=None, fine=False):
+def segment(input_path, output_dir, boxes_file=None, model="coarse", options=None):
     import numpy as np
     from PIL import Image, ImageOps
     started = time.monotonic()
+    options = options_for(model, options)
+    execution = {'device':'cpu','precision':'fp32'}
     im = ImageOps.exif_transpose(Image.open(input_path)).convert('RGBA')
     out = Path(output_dir).resolve(); out.mkdir(parents=True, exist_ok=True)
     boxes = json.loads(Path(boxes_file).read_text(encoding='utf-8-sig')) if boxes_file else None
@@ -58,9 +63,15 @@ def segment(input_path, output_dir, boxes_file=None, fine=False):
     for i, box in enumerate(boxes):
         if isinstance(box, list): box = dict(zip(['x','y','width','height'], box))
         if 'box' in box: box = {**box, **dict(zip(['x','y','width','height'], box['box']))}
-        x = max(0, int(box.get('x',0))); y = max(0, int(box.get('y',0)))
-        w = min(im.width-x, int(box.get('width',im.width))); h = min(im.height-y, int(box.get('height',im.height)))
-        if w <= 0 or h <= 0: raise ValueError(f'Invalid box {i}')
+        bx=float(box.get('x',0)); by=float(box.get('y',0))
+        bw=float(box.get('width',im.width)); bh=float(box.get('height',im.height))
+        if not all(__import__('math').isfinite(v) for v in [bx,by,bw,bh]) or bw<=0 or bh<=0: raise ValueError(f'Invalid box {i}')
+        if bx>=im.width or by>=im.height or bx+bw<=0 or by+bh<=0: raise ValueError(f'Box {i} outside image')
+        padding=0 if box.get('kind')=='background' else int(options['padding'])
+        x=max(0,int(__import__('math').floor(bx))-padding); y=max(0,int(__import__('math').floor(by))-padding)
+        right=min(im.width,int(__import__('math').ceil(bx+bw))+padding); bottom=min(im.height,int(__import__('math').ceil(by+bh))+padding)
+        w=right-x; h=bottom-y
+        if w<=0 or h<=0: raise ValueError(f'Invalid box {i}')
         crop = im.crop((x,y,x+w,y+h))
         name = str(box.get('name', f'图层 {i+1}'))
         if box.get('kind') == 'background':
@@ -69,18 +80,24 @@ def segment(input_path, output_dir, boxes_file=None, fine=False):
             backgrounds.append((len(result),x,y,w,h))
             warnings.append(f'{name}: 预览背景已扣除前景，遮挡区域待 Codex 补全，不是最终背景')
         else:
-            original_alpha = np.asarray(crop.getchannel('A'))
-            if original_alpha.min() < 255 and not boxes_file:
-                alpha = original_alpha
+            original_alpha = np.asarray(crop.getchannel('A')).astype(np.float32)/255
+            if original_alpha.min() < 1 and not boxes_file:
+                alpha = adjust_alpha(original_alpha.copy(),options)
             else:
-                alpha = np.asarray(model_mask(crop, fine))
-                alpha = (alpha.astype(np.float32) * original_alpha / 255).astype('uint8')
-            rgba = np.asarray(crop).copy(); rgba[:,:,3] = alpha
+                if model in ['birefnet','lucida']:
+                    raw,execution=fine_mask(crop,model,options)
+                else:
+                    raw=np.asarray(model_mask(crop,options['threads'])).astype(np.float32)/255
+                alpha=adjust_alpha(raw,options)*original_alpha
+            rgba=np.asarray(crop).copy()
+            if options.get('decontaminate'): rgba[:,:,:3]=decontaminate(rgba[:,:,:3],alpha)
+            alpha=np.round(np.clip(alpha,0,1)*255).astype('uint8')
+            rgba[:,:,3]=alpha
             foreground_union[y:y+h,x:x+w] = np.maximum(foreground_union[y:y+h,x:x+w],alpha)
             if int((alpha > 128).sum()) < 10: warnings.append(f'{name}: 模型未找到可信主体，请调整框选或交给 Codex')
         path = out / f'layer-{i+1}.png'
         Image.fromarray(rgba).save(path)
-        result.append({'name':name, 'path':str(path), 'x':x, 'y':y, 'width':w, 'height':h, 'preview': not fine})
+        result.append({'name':name, 'path':str(path), 'x':x, 'y':y, 'width':w, 'height':h, 'preview': True})
     for index,x,y,w,h in backgrounds:
         path = Path(result[index]['path'])
         rgba = np.asarray(Image.open(path)).copy()
@@ -88,7 +105,7 @@ def segment(input_path, output_dir, boxes_file=None, fine=False):
         Image.fromarray(rgba).save(path)
         result[index]['preview'] = True
     return {'layers':result, 'width':im.width, 'height':im.height,
-            'method':'isnet-general-use' if fine else 'u2netp', 'warnings':warnings,
+            'method':model, 'options':options, 'execution':execution, 'warnings':warnings,
             'seconds':round(time.monotonic()-started,3)}
 
 def main():
@@ -96,24 +113,13 @@ def main():
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('status')
     seg = sub.add_parser('segment'); seg.add_argument('--input',required=True); seg.add_argument('--output',required=True)
-    seg.add_argument('--boxes'); seg.add_argument('--fine',action='store_true')
-    vec = sub.add_parser('vectorize'); vec.add_argument('--input',required=True); vec.add_argument('--output',required=True)
-    vec.add_argument('--paths',type=int,default=1024); vec.add_argument('--device',choices=['auto','cpu','cuda'],default='auto')
-    vec.add_argument('--engine',choices=['supersvg','adavec'],default='supersvg')
-    vec.add_argument('--options',help='Path to a JSON object with engine-specific parameters')
+    seg.add_argument('--model',choices=['coarse','birefnet','lucida'],default='coarse'); seg.add_argument('--options',help='Frozen cutout parameter JSON');
+    seg.add_argument('--boxes')
     args = parser.parse_args()
     try:
         with contextlib.redirect_stdout(sys.stderr):
             if args.command == 'status': result = status()
-            elif args.command == 'segment': result = segment(args.input,args.output,args.boxes,args.fine)
-            else:
-                options=json.loads(Path(args.options).read_text(encoding='utf-8-sig')) if args.options else {}
-                if args.engine=='adavec':
-                    from adavec_adapter import dispatch
-                    result=dispatch(args.input,args.output,{'device':args.device,**options})
-                else:
-                    from supersvg_adapter import vectorize
-                    result = vectorize(args.input,args.output,args.paths,args.device,options)
+            elif args.command == 'segment': result = segment(args.input,args.output,args.boxes,args.model,json.loads(Path(args.options).read_text(encoding='utf-8-sig')) if args.options else None)
         print(json.dumps(result,ensure_ascii=False))
     except Exception as exc:
         import traceback

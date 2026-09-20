@@ -23,7 +23,13 @@
 - `server/providers.ts`：收费矢量服务；`external-vector.ts`、`vectorizer-browser.ts`、`web-vector-download.ts`：网页转换及文件导回。
 - `server/adobe.ts`、`scripts/adobe-*`：可选 Adobe MCP/脚本连接与受控路径。
 - `bridge/`：MCP、CLI、客户端与 Adobe 交接提示词；插件技能说明位于 `plugins/layer-canvas/skills/`。
-- `python/`：本地抠图工作进程；旧矢量实验代码保留但正常工作流不调用。
+- `python/`：仅保留 U2NetP、BiRefNet HR-matting、Lucida v7 的预览推理及安装。退役的本地矢量适配器、ISNet 分支和专用依赖已移除。
+- `shared/canvas.ts`：前后端共用文档、图像、图层、标注类型，避免重复定义发生偏移。
+- `server/layer-import.ts`：真实图层文件导入、尺寸检查和文字/效果预览；`web/CanvasMarks.tsx`：纯标注和统一工具图标绘制，保持原有事件传递。
+- `server/models.ts`：并发状态读取共用一次 Python 检查，成功缓存 15 秒；失败不缓存，安装后可重新检查。
+- `shared/cutout.ts`：三个本地模型的参数校验、通用默认值和四个流程名称；Web 与服务共用。
+- `shared/reconstruction-policy.ts`：Codex 重建/补图的一致性原则，共用于任务包和 Adobe 交接；技能要求每次实际生成时传入。
+- `server/cutouts.ts`、`cutout-settings.ts`：冻结参数的本地抠图预览和跨新画布默认值。`python/matting.py` 离线加载固定快照，`download_matting.py` 负责下载和摘要校验。
 
 ## 必须保留的约束
 
@@ -38,3 +44,7 @@
 ## 本机安全边界
 
 只监听回环地址，校验 Host / Origin。网页与可信 MCP 使用不同令牌；内部变更需要任务归属匹配。SVG 禁止脚本、外部资源与内嵌位图，资产路径限制在对应文档目录。密钥通过 Windows DPAPI 按用户加密保存。详见 SECURITY.md。
+
+- `server/reconstruction-inputs.ts`：剥离重建包里的预览像素路径，统一原图与标注输入，拒收直接复用的预览像素（包括重编码副本）。真实分层精抠准备入口已停用。
+
+- `shared/layer-frame.ts`、`web/LayerFrame.tsx`：可撤销的独立图层画幅与拖动几何；`server/layer-frames.ts`：冻结生成画幅、合并映射、实际文件尺寸校验和无拉伸回传。

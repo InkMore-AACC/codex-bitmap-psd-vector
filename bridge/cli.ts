@@ -5,7 +5,7 @@ import { CanvasClient } from './client.js';
 // This process never invokes a model or starts another Codex conversation.
 const [name, file] = process.argv.slice(2);
 if (!name || !file) throw new Error('用法：node --import tsx bridge/cli.ts <toolName> <arguments.json>');
-const args = JSON.parse(await readFile(file, 'utf8'));
+const args = JSON.parse((await readFile(file, 'utf8')).replace(/^\uFEFF/, ''));
 const client = new CanvasClient();
 let result: unknown;
 try {
@@ -18,7 +18,7 @@ try {
       break;
     }
     case 'canvas_wait_requests': result = await client.wait(args.taskId, args.timeoutMs ?? 50000, args.excludeJobIds); break;
-    case 'canvas_get_request': result = await client.packet(args.taskId, args.jobId); break;
+    case 'canvas_get_request': result = await client.packet(args.taskId, args.jobId,args.generationPlan); break;
     case 'canvas_claim_request': {
       await client.mutateJob(args.taskId, args.jobId, 'claim');
       result = await client.packet(args.taskId, args.jobId);
@@ -26,6 +26,10 @@ try {
     }
     case 'canvas_web_vector': { const {taskId,jobId,...payload}=args;result=await client.mutateJob(taskId,jobId,'web-vector',payload);break; }
     case 'canvas_adobe': { const {taskId,jobId,...payload}=args;result=await client.mutateJob(taskId,jobId,'adobe',payload);break; }
+    case 'canvas_prepare_cutouts': {
+      const {taskId,jobId,...payload}=args;
+      result=await client.mutateJob(taskId,jobId,'cutouts',payload); break;
+    }
     case 'canvas_apply_plan':
     case 'canvas_complete_request':
     case 'canvas_fail_request': {

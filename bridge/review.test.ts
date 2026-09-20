@@ -12,7 +12,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 process.env.LAYER_CANVAS_DATA = path.join(root, 'test-output', `bridge-review-${crypto.randomUUID()}`);
 const serverModule = import('../server/index.js');
 
-const baseLayer = (extra: Partial<Layer>): Layer => ({ id: 'layer-a', name: '标题', url: '/not-read', x: 0, y: 0, width: 128, height: 128, visible: true, opacity: 1, opinion: '', disposition: 'keep', kind: 'vector', ...extra });
+const baseLayer = (extra: Partial<Extract<Layer,{kind:'raster'|'text'|'vector'}>>): Layer => ({ id: 'layer-a', name: '标题', url: '/not-read', x: 0, y: 0, width: 128, height: 128, visible: true, opacity: 1, opinion: '', disposition: 'keep', kind: 'vector', ...extra });
 
 test('SVG layer combination updates quoted and whitespace fragment URLs after ID namespacing', () => {
   const input = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><defs><clipPath id="cut"><rect width="5" height="5"/></clipPath></defs><rect width="10" height="10" clip-path="url( &quot;#cut&quot; )"/></svg>';

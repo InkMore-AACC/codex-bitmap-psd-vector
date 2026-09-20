@@ -2,6 +2,7 @@ import { readFile, mkdir, open } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { serviceIdentity } from '../shared/service-identity.js';
 
 export type Service = { port: number; token: string; bridgeToken?: string; root?: string; pid?: number };
 export type Job = { id: string; taskId: string; documentId: string; status: string; type: string; [key: string]: unknown };
@@ -15,7 +16,8 @@ async function readService(): Promise<Service | undefined> {
     const info = JSON.parse(await readFile(path.join(data, 'service.json'), 'utf8')) as Service;
     if (!Number.isInteger(info.port) || info.port < 1024 || info.port > 65535 || typeof info.token !== 'string' || info.token.length < 16) return;
     const response = await fetch(`http://127.0.0.1:${info.port}/api/health`, { signal: AbortSignal.timeout(1200) });
-    if (response.ok && (await response.json() as { name?: string }).name === 'layer-canvas') return info;
+    const health=await response.json() as {name?:string;instanceId?:string};
+    if (response.ok && health.name === 'layer-canvas' && health.instanceId === serviceIdentity(root,data)) return info;
   } catch { /* stale service metadata is common after shutdown */ }
 }
 
@@ -89,11 +91,11 @@ export class CanvasClient {
     if (!Array.isArray(result) || result.some(job => job.taskId !== taskId)) throw new Error('队列任务归属校验失败。');
     return result;
   }
-  async packet(taskId: string, jobId: string): Promise<any> {
+  async packet(taskId: string, jobId: string, generationPlan?: {groups?:string[][];width?:number;height?:number}): Promise<any> {
     validateTask(taskId);
     const jobs = await this.jobs(taskId);
     if (!jobs.some(job => job.id === jobId)) throw new Error('此请求不属于当前对话。');
-    return this.request(`/api/jobs/${encodeURIComponent(jobId)}/packet?taskId=${encodeURIComponent(taskId)}`);
+    return this.request(`/api/jobs/${encodeURIComponent(jobId)}/packet?taskId=${encodeURIComponent(taskId)}${generationPlan?"&generationPlan="+encodeURIComponent(JSON.stringify(generationPlan)):""}`);
   }
   async mutateJob(taskId: string, jobId: string, action: string, input: object = {}): Promise<unknown> {
     await this.packet(taskId, jobId);

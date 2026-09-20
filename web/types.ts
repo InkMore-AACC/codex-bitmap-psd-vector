@@ -1,7 +1,32 @@
-export type Layer = { id: string; name: string; url: string; previewUrl?: string; x: number; y: number; width: number; height: number; visible: boolean; opacity: number; opinion: string; disposition: 'keep' | 'rebuild'; kind: 'raster' | 'text' | 'vector'; svg?: string; text?: { value: string; fontFamily: string; fontSize: number; color: string; x: number; y: number }; textDirty?: boolean; psdStyle?: { stroke?: { color: string; size: number }; shadow?: { color: string; blur: number; offsetX: number; offsetY: number; opacity: number } }; preview?: boolean; role?: 'background' | 'foreground'; originalPsdIndex?: number[]; groupPath?: string[] };
-export type Annotation = { id: string; layerId: string | null; type: 'arrow' | 'ellipse' | 'box' | 'pen' | 'text'; points: number[]; text: string; color: string; brushSize?: number; opacity?: number; strokeWidth?: number; fontWeight?: number; fontSize?: number; labelPosition?: [number, number] };
-export type CanvasImage = { id: string; name: string; width: number; height: number; x: number; y: number; source: string; url: string; layers: Layer[]; vectorLayers?: Layer[]; annotations: Annotation[]; opinion: string; status: 'original' | 'preview' | 'layered' | 'vector'; version: number; vectorUrl?: string; parentId?: string; sourceJobId?: string; sourceVersion?: number; basedOnOlderVersion?: boolean; artifactUrl?: string };
-export type VectorOptions = { supersvg?: { pathNum?: number; refinePathsPerSegment?: number; refineBatchSize?: number; seed?: number; device?: 'auto' | 'cpu' | 'cuda' }; adavec?: Record<string, number | string> };
-export type CanvasDocument = { id: string; taskId: string; revision: number; images: CanvasImage[]; settings: { psdMode: 2 | 3; vectorEngine: 'vectorizerCom' | 'recraft' | 'vectorizer302' | 'vectorizer'; vectorizerComMode?: 'auto' | 'codex'; theme: 'dark' | 'light'; vectorOptions?: VectorOptions }; layout: { layersWidth: number; opinionsWidth: number; editorHeight: number }; updatedAt: string };
-export type Job = { webProgress?:{phase:'working'|'verification'|'blocked';updatedAt:string;completed?:number;reviewUrl?:string;detail?:string}; dispatch?: {state:"sending"|"sent"|"received"|"failed"|"uncertain";updatedAt:string;detail?:string}; id: string; documentId: string; taskId: string; imageId: string; type: 'plan' | 'layer' | 'revise' | 'vectorize' | 'photoshop' | 'illustrator'; status: 'queued' | 'running' | 'waiting_codex' | 'completed' | 'failed' | 'cancelled'; message: string; createdAt: string; version: number; engine?: string; result?: { artifactUrl?: string; [key: string]: unknown } };
-export type ServiceSettings = { recraftConfigured: boolean; api302Configured: boolean; vectorizerConfigured: boolean; models: Record<string, unknown> };
+export type { Layer, Annotation, CanvasImage, Document as CanvasDocument } from '../shared/canvas';
+export type Job = {
+  webProgress?: {
+    phase: 'working' | 'verification' | 'blocked';
+    updatedAt: string;
+    completed?: number;
+    reviewUrl?: string;
+    detail?: string;
+  };
+  dispatch?: {
+    state: 'sending' | 'sent' | 'received' | 'failed' | 'uncertain';
+    updatedAt: string;
+    detail?: string;
+  };
+  id: string;
+  documentId: string;
+  taskId: string;
+  imageId: string;
+  type: 'plan' | 'layer' | 'revise' | 'vectorize' | 'photoshop' | 'illustrator';
+  status: 'queued' | 'running' | 'waiting_codex' | 'completed' | 'failed' | 'cancelled';
+  message: string;
+  createdAt: string;
+  version: number;
+  engine?: string;
+  result?: { artifactUrl?: string; [key: string]: unknown };
+};
+export type ServiceSettings = {
+  recraftConfigured: boolean;
+  api302Configured: boolean;
+  vectorizerConfigured: boolean;
+  models: Record<string, unknown>;
+};

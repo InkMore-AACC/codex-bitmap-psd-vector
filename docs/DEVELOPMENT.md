@@ -19,13 +19,23 @@ MCP 配置生成后包含本机绝对路径，已加入忽略规则；不要提�
 
 ## 额外测试
 
-`web/tests/` 是连接本机服务的较早浏览器验收脚本，部分要求显式测试任务环境变量；仅在隔离画布与测试素材中运行，不要让其操作设计师正在编辑的文档。`python/test_models.py` 是历史研究验收，依赖未公开的样例文件、旧矢量产物及额外 Python 依赖，不作为新安装命令，也不包含在 npm test 中。验证当前抠图请用自己的非敏感测试图调用 worker.py segment。
+`web/tests/` 是连接本机服务的额外浏览器验收脚本，部分要求显式测试任务环境变量；仅在隔离画布与测试素材中运行，不要让其操作设计师正在编辑的文档。默认 `npm test` 自行创建隔离测试数据。
 
-旧模型/样例脚本不属于当前用户工作流；被排除的个人测试素材不可作为安装前提。添加新测试应自行生成无隐私 fixture。
+Python 测试使用自动生成的素材和模拟模型输出，不依赖私人样例或退役模型：
+
+```powershell
+.runtime/python/Scripts/python.exe -m unittest discover -s python -p "test_*.py"
+.runtime/python/Scripts/python.exe -X utf8 python/worker.py status
+npm run format:check
+```
+
+Python 单元测试证明参数、坐标、透明度和预览契约，不代表真实模型的抠图质量。验证实际推理请使用非敏感测试图运行 `worker.py segment --model coarse|birefnet|lucida`，三个名称选择其一。
 
 ## 改动约定
 
-- 数据结构变更同步 `server/types.ts`、`server/validation.ts`、`web/types.ts` 及接口说明。
+- 图像、图层、标注和文档类型统一在 `shared/canvas.ts`，前后端从此处导出；校验规则在 `server/validation.ts`。服务端任务结构与浏览器任务摘要有意分开，避免将冻结快照发给界面。
+- 运行 `npm run format` 统一核心源码排版。不要再把整个请求处理或组件写成难以检查的单行。
+- 模型新增/移除时同步 worker、安装下载器、依赖、状态页及验收测试。旧设置迁移只在读取/正常保存时进行，不批量改写用户历史。
 - 维护当前 taskId / jobId / imageId / baseVersion 绑定，验证取消、并发、重入与重复回传。
 - 不静默降级为不同模型，不伪造下载或生成成功。
 - 修改费用、服务商或真实付费路径时，不用用户账户做未授权测试。
