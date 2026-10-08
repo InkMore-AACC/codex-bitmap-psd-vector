@@ -1,4 +1,6 @@
 import fs from 'node:fs';
+import { canvasBlend } from '../shared/blend.js';
+import { assertPsdBlendSupported } from './psd-blend.js';
 import path from 'node:path';
 import sharp from 'sharp';
 import { createCanvas, ImageData, loadImage } from '@napi-rs/canvas';
@@ -55,6 +57,7 @@ export async function importImage(
   let psdSource: string | undefined;
   if (ext === '.psd') {
     const psd = readPsd(buffer, { useImageData: true });
+    assertPsdBlendSupported(psd);
     width = psd.width;
     height = psd.height;
     checkDimensions(width, height);
@@ -84,6 +87,7 @@ export async function importImage(
           height: d.height,
           visible: !l.hidden,
           opacity: l.opacity ?? 1,
+          blendMode: l.blendMode === 'screen' ? 'screen' : 'normal',
           opinion: '',
           disposition: 'keep',
           kind: l.text ? 'text' : 'raster',
@@ -238,6 +242,19 @@ export async function renderTextLayer(layer: Layer, effects = false) {
   return c.toBuffer('image/png');
 }
 export async function renderImage(docId: string, image: CanvasImage) {
+  if(image.nativePsd) return fs.readFileSync(assetPath(docId,image.nativePsd.compositeUrl));
+  // Old imported documents may predate explicit blend metadata. Never render them as normal silently.
+  if (image.psdSource) {
+    const psd = readPsd(fs.readFileSync(assetPath(docId, image.psdSource)), { useImageData: true });
+    assertPsdBlendSupported(psd);
+    for (const l of image.layers) {
+      let node: PsdLayer | undefined;
+      let children = psd.children;
+      for (const i of l.originalPsdIndex || []) { node = children?.[i]; children = node?.children; }
+      if (!l.blendMode && node?.blendMode === 'screen')
+        throw new Error('旧PSD节点缺少滤色映射，请重新导入原PSD建立准确映射；旧节点与原文件保持不变');
+    }
+  }
   const canvas = createCanvas(image.width, image.height);
   const ctx = canvas.getContext('2d');
   if (!image.layers.length) {
@@ -253,6 +270,7 @@ export async function renderImage(docId: string, image: CanvasImage) {
     if (layer.kind === 'plan') continue;
     if (!layer.visible) continue;
     ctx.globalAlpha = layer.opacity;
+    ctx.globalCompositeOperation = canvasBlend(layer.blendMode);
     try {
       const img = await loadImage(fs.readFileSync(assetPath(docId, layer.previewUrl || layer.url)));
       ctx.drawImage(
@@ -273,16 +291,22 @@ export async function renderImage(docId: string, image: CanvasImage) {
   return canvas.toBuffer('image/png');
 }
 export function exportSvg(docId: string, image: CanvasImage) {
+  if ((image.vectorLayers || image.layers).some(l => l.blendMode === 'screen'))
+    throw new Error('滤色图层暂不支持SVG导出，请保留PNG或分层PSD');
   return combineSvg(image.width, image.height, image.vectorLayers || image.layers, (u) =>
     fs.readFileSync(assetPath(docId, u), 'utf8'),
   );
 }
-export async function exportPsd(docId: string, image: CanvasImage) {
+export async function exportPsd(docId: string, image: CanvasImage, originalOverride?: Psd) {
+  if(image.nativePsd && image.psdSource) return fs.readFileSync(assetPath(docId,image.psdSource));
   if (image.layers.some((l) => l.kind === 'plan'))
     throw new Error('规划框尚未重建，不能导出分层 PSD');
-  const original = image.psdSource
-    ? readPsd(fs.readFileSync(assetPath(docId, image.psdSource)), { useImageData: true })
-    : undefined;
+  const original =
+    originalOverride ||
+    (image.psdSource
+      ? readPsd(fs.readFileSync(assetPath(docId, image.psdSource)), { useImageData: true })
+      : undefined);
+  if (original) assertPsdBlendSupported(original);
   const psd: Psd = { ...(original || {}), width: image.width, height: image.height, children: [] };
   delete psd.canvas;
   const buffer = await renderImage(docId, image);
@@ -329,6 +353,7 @@ export async function exportPsd(docId: string, image: CanvasImage) {
       right: Math.round(l.x + l.width),
       bottom: Math.round(l.y + l.height),
       opacity: l.opacity,
+      blendMode: l.blendMode || existing?.blendMode || 'normal',
       hidden: !l.visible,
       imageData: {
         width: Math.round(l.width),

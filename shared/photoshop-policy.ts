@@ -1,0 +1,16 @@
+export const PHOTOSHOP_REFERENCE_POLICY = `PS重建一致性原则：
+只处理冻结的当前imageId。先查看当前干净图、最初原图、图层框、总图意见和逐层意见；当前节点已确认修改和本次明确意见优先，最初原图约束未要求变化的内容，不能撤回已确认修改。来源不完整须说明。标注为局部坐标，不烧录到图片。
+保持未要求变化的身份、文字、构图、位置比例、形状、材质、光照、颜色、遮挡和透明细节。预览抠图像素和蒙版一律不能作为最终素材或生图参考。显式引用允许的干净局部裁片作为细节/布局参考，整图提供语境；不能宣称模型提供数值参考权重。
+位图、复杂光效默认实际调用当前对话image_gen，再结合PS混合模式、蒙版和原生效果合成。文字和形状根据真实参考选择方法；原生文字须匹配源字形，简单字行也不能默认套用字体。无法匹配时以实际尝试或绑定本job干净参考的具体限制评估独立像素层，声明pixels与nativeFallback，不做明知不匹配的可编辑替身。允许的extract必须沿物体轮廓产生真实透明区域并补全遮挡，矩形裁片不算提取。粗抠/精抠预览仍不得参与。
+按冻结的图层顺序、名称和画幅提交逐层计划。每层说明内容归属、排除元素、依赖、可编辑程度以及合成方式；光效先决定透明/黑底、混合模式及由PS添加哪些效果，避免生成素材与PS重复叠加。背景需要移除已分出的文字和物体并补全，不得以整张原图垫底。原图只能放在隐藏LC_REFERENCE参考层。
+各层按任务包generation.size请求，预算是插件策略，不是上游硬上限。实测生成文件尺寸，PSD画幅/位置和素材分辨率分开记录；保留透明留白，禁止按alpha轮廓裁切或非等比拉伸。新流程先使用工作素材在PS中确认几何与外观，再用canvas_ps_rebuild upscale-material触发本地SeedVR2；重新置入检查，对比超分前后，改变细节时退回工作版等比缩放。文字/矢量/PS原生效果不做位图超分。
+每层先真实检查，已确认的失败可立即标为needs-revision并记录未解决问题；设置中的尝试次数只是上限，不强制追加生成或纠正。需要纠正时针对实际原因改变方法，保留最好版本，不重复相同提示词盲试。遇到插件系统性缺陷先修实现或规则，再验证；本次插件改进测试每轮换新复杂图，针对前轮失败，正常PSD任务仍保持冻结原图和授权范围。轻微纹理/发丝差异无需过度重试，1%几何容差不是视觉一致性阈值。完成后必须检查PS实际合成预览及各层预览，记录文字错位、重复光效、缺物体、遮挡错误及实际修复结果，不伪造通过。`;
+
+export const PHOTOSHOP_WORKFLOW = `PS重建新流程v4，旧任务以packet版本为准。先读RECONSTRUCTION.md和PHOTOSHOP.md。所有操作在当前真实taskId/jobId内。
+保留已确认keep及非目标图层的原生内容（preserve），制作真实分层 PSD；完成前必须重新打开实际输出核验，不覆盖用户打开的原文档。
+1. plan完整覆盖冻结层ID/顺序/frame；每层elements列出文字、图标、装饰等全部内容。textTargets包含实际源墨迹box及appearance（font,color,rotation,requiresShear,warpStyle,requiredEffects,observation），不能把带留白frame当字形目标。位图/光效generate或hybrid；文字/形状按真实字形选择，原生路线须匹配源，不因简单就默认native。extract是可选真实物体分离，不是矩形裁片。背景补全，不能整图垫底。
+2. generate及hybrid的生成部分先canvas_generation prepare，元素清单与PS计划一致。用实际干净局部/整图按准备prompt调用当前image_gen；固定150万预算含透明。返回原文件立即register，不自行缩放/描摹。新流程允许allowExtraction开启时，在transparent hybrid层先真实提取当前干净原图的可见物体作为完整基底，再用本任务真实登记的生成补丁repair；提取必须记录extraction来源及完整carrier定位，不伪造generationId。纯generate仍须generated，其他路线不放宽。可基于对应定位点align统一缩放/平移并重看对比，不能按alpha居中、拉伸形状或裁掉弱alpha。
+3. material先准备工作图，place-material按placementFrame而非强塞frame装入LC_<layerId>智能对象，回读完整素材四角；carrier可承载狭长构图，150万预算不变。plan的elements唯一归属、excludes排除其他层、anchors冻结原参考目标、relations记录接触遮挡；inspect-progress中途检查实际叠放。先原素材inspect/review通过，再按设置upscale-material，重新置入检查；超分变形可退回工作版。禁止按alpha包围盒居中，不提前超分漂移候选。
+4. PS原生文字试配字体、字距、角度、透视、变形、渐变/描边/阴影等。字体未确认时先读实际安装字体，按同源单字宽度、笔画和字符位置选择有限候选，新诊断一次最多比较三个有依据的字体，不预设统一字体或字距。fit-text默认等比，rotation是目标角度，shear是追加斜切，warp/styles辅助常见效果，复杂效果用真实MCP/脚本完成；外框吻合不代表内部字形匹配。诊断副本不匹配原冻结参数。改变已冻结字体或路线时另存新计划修订，绑定同一task/job/layer、原计划摘要及原因，保留旧计划、源点和试排；不追改原计划。无法匹配时记录nativeFallback实际尝试证据或绑定本job干净参考的具体限制再评估独立像素层，明确不可编辑，不得隐藏普通字体蒙混。未解决字行标为需修订，可继续其他独立层和可验证关系，不因一个失败字体暂停整个循环。
+5. inspect真实渲染与参数回读只是事实证据。review逐元素包含comparisonHash、隔离/补全/外观/文字和referenceComparison（geometry/appearance/typography），描述相对于原图的字形变形和效果；自己的计划与参数相同不代表一致。review-composite逐项检查relations并把差异落实到红色问题层。一次真实检查已确认的问题可直接红标，不为凑次数重复制作；最后complete未经改动的inspect PSD。
+当前MCP列表缺新工具/字段时直接以bridge/cli.ts转发完整JSON到同一任务，不削弱规则，不要求用户另开对话或手动接单。`;

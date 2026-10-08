@@ -12,6 +12,9 @@ import { layerFrame, scaledFrame, unionFrames, frameSchema } from '../shared/lay
 import type { Job, Layer } from './types.js';
 import { assetPath, writeAsset, dir, atomic, json } from './store.js';
 import { renderStyledLayer, renderTextLayer } from './media.js';
+import { registeredGeneration } from './generation.js';
+import { derivedWorkingSnapshot } from './generation-matte.js';
+import { restoreGeneration } from './generation-placement.js';
 
 const reject = (message: string): never => {
   throw Object.assign(new Error(message), { status: 400 });
@@ -32,6 +35,7 @@ export function frameContract(
     reject('输出尺寸必须同时提供宽高');
   if (
     job.layerIds?.length &&
+    !job.preserveKeptLayers &&
     (output.width !== job.snapshot.width || output.height !== job.snapshot.height)
   )
     reject('局部修改不能改变整图尺寸');
@@ -64,7 +68,7 @@ export function frameContract(
         sx,
         sy,
       );
-      const generation = generationPlan(frame);
+      const generation = generationPlan(frame, job.photoshop?.generationPixelBudget);
       return {
         layerId: l.id,
         sourceLayerIds: ids,
@@ -76,10 +80,22 @@ export function frameContract(
           .map((a) => ({
             ...a,
             points: a.points.flatMap((_, i) =>
-              i % 2 ? [] : generationPoint(frame, a.points[i] * sx, a.points[i + 1] * sy),
+              i % 2
+                ? []
+                : generationPoint(
+                    frame,
+                    a.points[i] * sx,
+                    a.points[i + 1] * sy,
+                    job.photoshop?.generationPixelBudget,
+                  ),
             ),
             labelPosition: a.labelPosition
-              ? generationPoint(frame, a.labelPosition[0] * sx, a.labelPosition[1] * sy)
+              ? generationPoint(
+                  frame,
+                  a.labelPosition[0] * sx,
+                  a.labelPosition[1] * sy,
+                  job.photoshop?.generationPixelBudget,
+                )
               : undefined,
             brushSize:
               a.brushSize === undefined
@@ -90,7 +106,11 @@ export function frameContract(
       };
     }),
     instruction:
-      'frame 是最终图层位置与画幅；generation.size 才是生图目标，最多155万像素。透明留白计入完整画幅，不裁边、不居中物体、不铺满。生成坐标使用同一个scale和偏移，原图标注不变。输出即使约157万像素或比目标更小也不直接判失败；服务按实际尺寸以1%宽高比容差等比放大/缩小放回frame，严禁分别拉伸宽高。提交生图原始文件，x/y/width/height仍对应最终frame。逐层用stageOnly暂存并检查，再提交全部原始产物完成；暂存不代表视觉合格。合并先求全部sourceLayerIds的框并集，用canvas_get_request的generationPlan.groups获取合并/改尺寸后的生成计划。实际比例超过1%保留文件，不静默重试生图。只有确认多余留白且坐标相符时可声明sourceCrop，服务只允许裁掉全透明像素并记录偏移；禁止自动裁alpha包围盒、阈值删除弱alpha。背景少量补边复制边缘像素，必须检查接缝。提示词不能硬性保证工具尺寸，低分辨率允许等比放大但不得称为原生高清。',
+      job.reconstructionWorkflowVersion === 4
+        ? 'frame是冻结设计框；canvas_generation prepare返回carrier才是本次生图承载画幅和150万以内请求尺寸。透明留白计入预算。register测量原件并记录placementFrame，align只能按冻结原参考点统一缩放平移。最终完整素材可越出frame，不能二次contain挤小物体或裁弱alpha。完成请求仍提交冻结frame及原件ID，后台自动放置。普通流程逐层review/composite，最终review-composite；PS按实际文件置入并渲染检查。'
+        : job.type === 'photoshop'
+          ? 'frame为PSD最终画幅，generation.size为请求尺寸预算；不是上游模型硬上限。检查实际文件尺寸，按统一倍率适配，不裁透明边缘。PS重建使用canvas_ps_rebuild管理素材与按需SeedVR2超分；未要求改变的层名、顺序和画幅保持冻结计划。'
+          : 'frame 是最终图层位置与画幅；generation.size 才是生图目标，最多150万像素。透明留白计入完整画幅，不裁边、不居中物体、不铺满。生成坐标使用同一个scale和偏移，原图标注不变。输出即使约157万像素或比目标更小也不直接判失败；服务按实际尺寸以1%宽高比容差等比放大/缩小放回frame，严禁分别拉伸宽高。提交生图原始文件，x/y/width/height仍对应最终frame。逐层用stageOnly暂存并检查，再提交全部原始产物完成；暂存不代表视觉合格。合并先求全部sourceLayerIds的框并集，用canvas_get_request的generationPlan.groups获取合并/改尺寸后的生成计划。实际比例超过1%保留文件；v3通过canvas_generation针对性纠正/定位后验收，仍不理想可标红继续。旧任务可声明sourceCrop裁全透明边；v3不得外部预裁，改用登记后的定位校验；禁止自动裁alpha包围盒、阈值删除弱alpha。背景少量补边复制边缘像素，必须检查接缝。提示词不能硬性保证工具尺寸，低分辨率允许等比放大但不得称为原生高清。',
   };
 }
 
@@ -124,6 +144,8 @@ export async function normalizeFramedResults(
       consumed.add(id);
       return l;
     });
+    if (job.reconstructionWorkflowVersion === 4)
+      sources.sort((a, b) => before.layers.indexOf(a) - before.layers.indexOf(b));
     const frame = scaledFrame(
       unionFrames(sources.map((l) => layerFrame(l, before))),
       width / before.width,
@@ -155,7 +177,56 @@ export async function normalizeFramedResults(
         result.role ||
         (sources.every((s) => s.role === 'background') ? 'background' : 'foreground'),
     };
-    if (l.kind === 'text' && l.text) {
+    const registration =
+      job.reconstructionVersion === 3 || result.generationId
+        ? registeredGeneration(
+            job,
+            result.generationId,
+            ids,
+            frame,
+            result.url ? fs.readFileSync(assetPath(job.documentId, result.url)) : undefined,
+          )
+        : undefined;
+    if (registration) {
+      if (result.blendMode !== undefined && result.blendMode !== (registration.blendMode || 'normal'))
+        reject('回传混合模式与已登记素材不一致，不能更换审核后的合成方式');
+      l.blendMode = registration.blendMode || 'normal';
+      if (l.kind !== 'raster' || l.sourceCrop || l.psdStyle || l.text)
+        reject(
+          '普通重建只接收登记的原始生成位图，不能以SVG、文字或预处理替代；可编辑制作请走PS重建',
+        );
+      if (!allowIncomplete && !registration.review) reject('请先查看本层实际对比图并逐元素验收');
+      l.review = registration.review;
+      if (job.reconstructionWorkflowVersion === 4) {
+        l.opacity = sources[0].opacity;
+        l.visible = sources[0].visible;
+      }
+    }
+    if (
+      registration?.placementFrame &&
+      (job.reconstructionWorkflowVersion === 4 || registration.alignment)
+    ) {
+      const restored = await restoreGeneration(
+        derivedWorkingSnapshot(registration),
+        registration.placementFrame,
+        registration.backgroundPadding,
+      );
+      l.generationSourceUrl = l.url;
+      l.generationSize = registration.originalSize;
+      l.url = writeAsset(job.documentId, restored.bytes, '.png');
+      // Design frame remains frozen. Pixel bounds include carrier margins or
+      // transformed overflow; no second contain/centering shrinks the subject.
+      Object.assign(l, restored.bounds);
+      l.generationAdaptation = {
+        scale: restored.scale,
+        offsetX: l.x - frame.x,
+        offsetY: l.y - frame.y,
+        contentWidth: l.width - (registration.backgroundPadding?.left || 0) - (registration.backgroundPadding?.right || 0),
+        contentHeight: l.height - (registration.backgroundPadding?.top || 0) - (registration.backgroundPadding?.bottom || 0),
+        aspectError: registration.aspectError,
+        padding: registration.backgroundPadding ? 'edge-copy' : 'transparent',
+      };
+    } else if (l.kind === 'text' && l.text) {
       l.url = writeAsset(job.documentId, await renderTextLayer(l), '.png');
       l.generationSize = undefined;
     } else {
@@ -183,15 +254,20 @@ export async function normalizeFramedResults(
           .png()
           .toBuffer();
       }
-      const content = crop || { width: w, height: h };
+      const content = registration?.alignment
+        ? registration.workingSize
+        : crop || { width: w, height: h };
       const error = aspectError(content, frame);
-      if (error > ASPECT_TOLERANCE + 1e-12) {
+      if (error > ASPECT_TOLERANCE + 1e-12 && !registration) {
         reject(
           `「${l.name}」实际生成 ${w} × ${h}，与画幅 ${frame.width} × ${frame.height} 宽高比偏差 ${(error * 100).toFixed(2)}%，超过1%。已保留文件，未强行拉伸；请检查构图后再提交。`,
         );
       }
       l.generationSize = { width: w, height: h };
       if (l.kind === 'raster') {
+        // Normalize the actual tool output to the common budget before restoration.
+        // The original asset and actual dimensions above remain unchanged.
+        if (registration) bytes = fs.readFileSync(registration.workingPath);
         const fit = fitGeometry(content, frame);
         const background = l.role === 'background';
         if (background && (fit.width !== frame.width || fit.height !== frame.height)) {
@@ -259,6 +335,14 @@ export async function normalizeFramedResults(
   if (!allowIncomplete && candidates.some((l) => !consumed.has(l.id)))
     reject(
       '重建结果缺少已确认的图层；请返回全部目标图层，合并时明确 sourceLayerIds，不能用空图代替。',
+    );
+  // Match the frozen order used by composite review, including merged groups.
+  // Payload array order must not silently change the approved stacking order.
+  if (job.reconstructionWorkflowVersion === 4)
+    normalized.sort(
+      (a, b) =>
+        before.layers.findIndex((l) => l.id === a.id) -
+        before.layers.findIndex((l) => l.id === b.id),
     );
   return normalized;
 }

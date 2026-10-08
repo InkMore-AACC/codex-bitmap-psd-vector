@@ -1,6 +1,6 @@
 # 第三方组件、服务与许可边界
 
-源码依赖版本以 package-lock.json 为准；Python 依赖见 python/requirements.txt 和 python/requirements-matting.txt。第三方组件不因本仓库公开而改变自身许可。此清单是维护入口，不是完整法律审计。
+源码依赖版本以 package-lock.json 为准；Python 依赖见 python/requirements.txt、python/requirements-matting.txt 和 python/requirements-seedvr2.txt。第三方组件不因本仓库公开而改变自身许可。此清单是维护入口，不是完整法律审计。
 
 | 组件/服务 | 用途 | 来源 |
 |---|---|---|
@@ -24,3 +24,7 @@
 API 价格与可用性由服务商决定。项目设置的价格是参考信息，提交前以自己的账户和服务商结算为准；本仓库不赠送 API 余额或 Adobe 许可。
 
 历史 SuperSVG / AdaVec 研究脚本和旧 ISNet 分支已移除，当前安装不下载其权重。未随仓库分发任何模型权重、第三方论文全文或参考项目素材。仅删除项目直接声明中不再使用的依赖，不主动卸载用户共享 Python 环境中的间接依赖。
+
+SeedVR2 7B INT8：ByteDance SeedVR模型Apache-2.0，Comfy-Org转换权重Apache-2.0；插件安装时下载的ComfyUI推理核心遵循GPL-3.0及其组件许可证，来源与完整许可证随固定源码保存在本地.runtime目录。源码发布不捆绑模型与运行时。模型页https://huggingface.co/Comfy-Org/SeedVR2；核心https://github.com/Comfy-Org/ComfyUI。
+
+视频编解码使用PyAV及imageio-ffmpeg随包二进制，具体FFmpeg构建（含libx264）的许可独立适用；发布安装包应保留对应许可声明。

@@ -12,7 +12,10 @@ export function pythonPath() {
 }
 export async function worker(args: string[], signal?: AbortSignal): Promise<any> {
   const python = pythonPath();
-  if (!python) throw new Error('本地模型运行环境尚未安装，请运行 scripts/setup-models.ps1');
+  if (!python)
+    throw new Error(
+      `本地模型运行环境尚未安装，请运行 scripts/${args[0].startsWith('upscale') || args[0].startsWith('video-') ? 'setup-seedvr2' : 'setup-models'}.ps1`,
+    );
   if (signal?.aborted) throw new Error('已取消');
   return new Promise((resolve, reject) => {
     const proc = spawn(python, ['-X', 'utf8', path.join(ROOT, 'python', 'worker.py'), ...args], {
@@ -37,7 +40,8 @@ export async function worker(args: string[], signal?: AbortSignal): Promise<any>
     };
     const abort = () => stop('已取消');
     signal?.addEventListener('abort', abort, { once: true });
-    const timer = setTimeout(() => stop('本地模型超时（20分钟）'), 20 * 60 * 1000);
+    const minutes = args[0] === 'video-upscale' ? 360 : 20;
+    const timer = setTimeout(() => stop(`本地处理超时（${minutes}分钟）`), minutes * 60 * 1000);
     const cleanup = () => {
       clearTimeout(timer);
       signal?.removeEventListener('abort', abort);
@@ -56,7 +60,17 @@ export async function worker(args: string[], signal?: AbortSignal): Promise<any>
     proc.on('close', (code) => {
       cleanup();
       if (stopped) return reject(new Error(stopped));
-      if (code !== 0) return reject(new Error(`本地模型执行失败：${err || out}`));
+      if (code !== 0) {
+        if (args[0] === 'upscale' || args[0].startsWith('video-')) {
+          try {
+            const detail = JSON.parse(out.trim().split(/\r?\n/).at(-1) || '{}');
+            if (typeof detail.error === 'string') return reject(new Error(detail.error));
+          } catch {
+            /* keep native diagnostics when no structured error was returned */
+          }
+        }
+        return reject(new Error(`本地模型执行失败：${err || out}`));
+      }
       try {
         const lines = out.trim().split(/\r?\n/);
         const result = JSON.parse(lines[lines.length - 1]);

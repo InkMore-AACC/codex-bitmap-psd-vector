@@ -108,18 +108,64 @@ def segment(input_path, output_dir, boxes_file=None, model="coarse", options=Non
             'method':model, 'options':options, 'execution':execution, 'warnings':warnings,
             'seconds':round(time.monotonic()-started,3)}
 
+def remove_background(input_path, output_dir, model='birefnet', options=None):
+    """Independent full-frame matting: predict a new alpha even for existing RGBA inputs."""
+    import numpy as np
+    from PIL import Image, ImageOps
+    if model not in ['birefnet', 'lucida']: raise ValueError('独立抠图只支持精细模型')
+    started = time.monotonic()
+    opts = options_for(model, options)
+    opts['padding'] = 0
+    im = ImageOps.exif_transpose(Image.open(input_path)).convert('RGBA')
+    rgba = np.asarray(im).copy()
+    raw, execution = fine_mask(im, model, opts)
+    if raw.shape != (im.height, im.width) or not np.isfinite(raw).all():
+        raise ValueError('抠图模型返回了无效的透明度图')
+    alpha = adjust_alpha(raw, opts) * (rgba[:, :, 3].astype(np.float32) / 255)
+    if opts['decontaminate']: rgba[:, :, :3] = decontaminate(rgba[:, :, :3], alpha)
+    rgba[:, :, 3] = np.round(np.clip(alpha, 0, 1) * 255).astype('uint8')
+    if not np.any(rgba[:, :, 3]): raise ValueError('模型未识别出前景，请尝试另一精细模型或调整透明度参数')
+    out = Path(output_dir).resolve(); out.mkdir(parents=True, exist_ok=True)
+    output = out / 'cutout.png'
+    Image.fromarray(rgba).save(output)
+    warnings = []
+    if rgba[:, :, 3].min() == 255: warnings.append('模型将整图判断为前景，背景可能未被去除，可尝试另一模型')
+    return {'path': str(output), 'width': im.width, 'height': im.height,
+            'method': model, 'options': opts, 'execution': execution, 'warnings': warnings,
+            'seconds': round(time.monotonic()-started, 3)}
+
 def main():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('status')
+    us = sub.add_parser('upscale-status'); us.add_argument('--model', choices=['seedvr2-7b-int8'], default='seedvr2-7b-int8')
+    up = sub.add_parser('upscale'); up.add_argument('--input', required=True); up.add_argument('--output', required=True); up.add_argument('--options', required=True)
+    for command in ['video-prepare', 'video-upscale']:
+        vp = sub.add_parser(command); vp.add_argument('--input', required=True); vp.add_argument('--output', required=True); vp.add_argument('--options')
     seg = sub.add_parser('segment'); seg.add_argument('--input',required=True); seg.add_argument('--output',required=True)
     seg.add_argument('--model',choices=['coarse','birefnet','lucida'],default='coarse'); seg.add_argument('--options',help='Frozen cutout parameter JSON');
     seg.add_argument('--boxes')
+    matte = sub.add_parser('matte'); matte.add_argument('--input', required=True); matte.add_argument('--output', required=True)
+    matte.add_argument('--model', choices=['birefnet','lucida'], default='birefnet'); matte.add_argument('--options')
     args = parser.parse_args()
     try:
         with contextlib.redirect_stdout(sys.stderr):
             if args.command == 'status': result = status()
+            elif args.command == 'upscale-status':
+                from seedvr2 import status as upscale_status
+                result = upscale_status()
+            elif args.command == 'upscale':
+                options = json.loads(Path(args.options).read_text(encoding='utf-8-sig'))
+                from seedvr2 import upscale
+                result = upscale(args.input, args.output, options)
+            elif args.command == 'video-prepare':
+                from video_upscale import prepare
+                result = prepare(args.input, args.output)
+            elif args.command == 'video-upscale':
+                from video_upscale import upscale_video
+                result = upscale_video(args.input, args.output, json.loads(Path(args.options).read_text(encoding='utf-8-sig')))
             elif args.command == 'segment': result = segment(args.input,args.output,args.boxes,args.model,json.loads(Path(args.options).read_text(encoding='utf-8-sig')) if args.options else None)
+            elif args.command == 'matte': result = remove_background(args.input,args.output,args.model,json.loads(Path(args.options).read_text(encoding='utf-8-sig')) if args.options else None)
         print(json.dumps(result,ensure_ascii=False))
     except Exception as exc:
         import traceback

@@ -1,11 +1,31 @@
+import { importVideo, videoExtension } from './video.js';
+import { PHOTOSHOP_REFERENCE_POLICY } from '../shared/photoshop-policy.js';
+import {
+  photoshopAction,
+  photoshopPacket,
+  processPhotoshopMaterial,
+  completePhotoshop,
+  photoshopState,
+  photoshopFolder,
+  validatePhotoshopPlan,
+} from './photoshop-rebuild.js';
+import { readPhotoshopDefaults, savePhotoshopDefaults } from './photoshop-settings.js';
+import { renderNativePsd, nativeProgressLayers, taskPsd, fileHash } from './photoshop-native.js';
 import { layerFromFile } from './layer-import.js';
 import { planningLayer } from '../shared/planning.js';
 import { frameSchema } from '../shared/layer-frame.js';
 import { frameContract, normalizeFramedResults } from './layer-frames.js';
-import { layerFrame } from '../shared/layer-frame.js';
+import { layerFrame, scaledFrame } from '../shared/layer-frame.js';
 import { reconstructionInputs, rejectPreviewReuse } from './reconstruction-inputs.js';
 import { RECONSTRUCTION_POLICY } from '../shared/reconstruction-policy.js';
+import { RECONSTRUCTION_REVIEW_POLICY } from '../shared/layer-review.js';
+import { applyLayerReviews } from './layer-review.js';
+import { reconstructionCrops } from './reconstruction-crops.js';
+import { generationAction, generationSummary, generationState, captureDerivedConsumer, verifyDerivedConsumer, prepareGeneratedRoleConsumer } from './generation.js';
+import { requireCompositeApproval } from './generation-workflow.js';
 import { serviceIdentity } from '../shared/service-identity.js';
+import { hasCanvasOwners, lifecycleGuard } from './lifecycle.js';
+import { acquireServiceLock } from './service-lock.js';
 import express from 'express';
 import { originalReference } from './references.js';
 import multer from 'multer';
@@ -48,6 +68,11 @@ import { cleanSvg } from './svg.js';
 import { modelStatus, worker } from './models.js';
 import { DEFAULT_CUTOUT } from '../shared/cutout.js';
 import { readCutoutDefaults, saveCutoutDefaults } from './cutout-settings.js';
+import { readMattingDefaults, saveMattingDefaults } from './matting-settings.js';
+import { readUpscaleDefaults, saveUpscaleDefaults } from './upscale-settings.js';
+import { upscaleImage } from './upscale.js';
+import { upscaleDimensions, upscaleModelName } from '../shared/upscale.js';
+import { standaloneMatting } from './standalone-matting.js';
 import { cutoutPacket, runLocalCutouts, prepareCutouts } from './cutouts.js';
 import { keyStatus, updateKeys } from './credentials.js';
 import { vectorize } from './providers.js';
@@ -70,6 +95,7 @@ import {
   prepareDispatch,
   dispatchJob,
   needsCodex,
+  dispatchBusy,
 } from './dispatch.js';
 import { buildHandoffPrompt } from '../bridge/handoff.js';
 const previous = json<any>(path.join(DATA, 'service.json'), {});
@@ -80,8 +106,25 @@ export const TOKEN = previous.token || crypto.randomBytes(32).toString('hex');
 export const BRIDGE_TOKEN = previous.bridgeToken || crypto.randomBytes(32).toString('hex');
 export const adobe = new AdobeConnector(ROOT, DATA);
 const aborters = new Map<string, AbortController>();
+let activeRequests = 0;
+let queuedLocalWork = 0;
 const fail = (message: string, status = 400) => Object.assign(new Error(message), { status });
 export const app = express();
+app.use((req, res, next) => {
+  if (req.path !== '/api/health') {
+    activeRequests++;
+    let done = false;
+    const release = () => {
+      if (!done) {
+        done = true;
+        activeRequests--;
+      }
+    };
+    res.once('finish', release);
+    res.once('close', release);
+  }
+  next();
+});
 app.disable('x-powered-by');
 app.use((req, res, next) => {
   const host = req.hostname;
@@ -113,6 +156,7 @@ app.get('/api/health', (_req, res) =>
     ok: true,
     name: 'layer-canvas',
     version: '0.1.0',
+    reconstructionWorkflowVersion: 4,
     instanceId: serviceIdentity(ROOT, DATA),
   }),
 );
@@ -169,6 +213,8 @@ function assertAssets(docId: string, im: CanvasImage) {
     im.vectorUrl,
     im.psdSource,
     im.artifactUrl,
+    im.video?.previewUrl,
+    im.nativePsd?.compositeUrl,
     ...[...im.layers, ...(im.vectorLayers || [])].flatMap((l) => [
       l.url,
       l.previewUrl,
@@ -219,6 +265,13 @@ app.put('/api/document/:id', async (req, res) => {
   for (const im of d.images) {
     const old = current.images.find((i) => i.id === im.id) || deleted[im.id];
     if (!old) throw fail('请通过导入入口添加图片');
+    if (
+      im.mediaType !== old.mediaType ||
+      !isDeepStrictEqual(im.video, old.video) ||
+      (old.mediaType === 'video' &&
+        (im.width !== old.width || im.height !== old.height || im.url !== old.url))
+    )
+      throw fail('视频素材与媒体信息不可更改');
     if (im.source !== old.source || im.psdSource !== old.psdSource) throw fail('原始素材不可替换');
     for (const key of [
       'parentId',
@@ -228,6 +281,60 @@ app.put('/api/document/:id', async (req, res) => {
       'artifactUrl',
     ] as const)
       if (im[key] !== old[key]) throw fail('结果来源不可更改');
+    if (!isDeepStrictEqual(im.nativePsd, old.nativePsd)) throw fail('原生PSD映射不可改写');
+    if (old.nativePsd) {
+      if (im.width !== old.width || im.height !== old.height)
+        throw fail('原生PSD尺寸请通过交接PS修改');
+      if (
+        im.layers.length !== old.layers.length ||
+        im.layers.some((l) => !old.layers.some((o) => o.id === l.id))
+      )
+        throw fail('原生PSD增删图层请通过交接PS修改');
+      for (const l of im.layers) {
+        const prior = old.layers.find((o) => o.id === l.id)!;
+        const pixels = (v: Layer) => [
+          v.url,
+          v.previewUrl,
+          v.kind,
+          v.x,
+          v.y,
+          v.width,
+          v.height,
+          v.text,
+          v.psdStyle,
+          v.blendMode,
+        ];
+        if (!isDeepStrictEqual(pixels(l), pixels(prior)))
+          throw fail('原生文字、形状与效果请通过交接PS修改，避免丢失PS属性');
+      }
+      const state = (i: CanvasImage) => i.layers.map((l) => [l.id, l.visible, l.opacity]);
+      if (!isDeepStrictEqual(state(im), state(old))) {
+        const mappings = im.layers.map((l) => ({
+          ...old.nativePsd!.mappings.find((m) => m.layerId === l.id)!,
+          visible: l.visible,
+          opacity: l.opacity,
+        }));
+        const rendered = await renderNativePsd(
+          adobe,
+          assetPath(d.id, old.psdSource!),
+          path.join(dir(d.id), 'native-previews', uid()),
+          mappings,
+          true,
+        );
+        im.url = writeAsset(d.id, fs.readFileSync(rendered.previewPath), '.png');
+        im.psdSource = writeAsset(d.id, fs.readFileSync(rendered.psdPath), '.psd');
+        im.artifactUrl = im.psdSource;
+        im.nativePsd = {
+          ...old.nativePsd,
+          mappings: mappings.map(({ layerId, groupName, editable }) => ({
+            layerId,
+            groupName,
+            editable,
+          })),
+          compositeUrl: im.url,
+        };
+      }
+    }
     assertAssets(d.id, im);
     for (const [collection, oldCollection] of [
       [im.layers, old.layers],
@@ -298,15 +405,51 @@ app.post('/api/document/:id/import', upload.array('files', 20), async (req, res)
   current.revision++;
   res.json(save(current));
 });
+const videoScratch = path.join(DATA, 'video-uploads');
+fs.mkdirSync(videoScratch, { recursive: true });
+const videoUpload = multer({ dest: videoScratch, limits: { fileSize: 2 * 1024 ** 3, files: 1 } });
+app.post('/api/document/:id/import-video', videoUpload.single('files'), async (req, res) => {
+  if (!req.file) throw fail('请选择视频');
+  queuedLocalWork++;
+  try {
+    const d = load(String(req.params.id));
+    const im = await importVideo(
+      d,
+      req.file.path,
+      Buffer.from(req.file.originalname, 'latin1').toString('utf8'),
+      app.locals.videoWorker || worker,
+    );
+    const fresh = load(d.id);
+    if (fresh.images.length >= 100) throw fail('画布节点已达100个');
+    history(fresh);
+    fresh.images.push(im);
+    fresh.revision++;
+    res.json(save(fresh));
+  } finally {
+    queuedLocalWork--;
+    fs.rmSync(req.file.path, { force: true });
+  }
+});
 app.post('/api/document/:id/import-path', internal, async (req, res) => {
   const d = load(String(req.params.id));
   if (req.body.taskId !== d.taskId) throw fail('对话不匹配', 403);
   const input = String(req.body.path || '');
   if (!path.isAbsolute(input)) throw fail('需要本地绝对路径');
   const stat = fs.statSync(input);
-  if (!stat.isFile() || stat.size > 160 * 1024 * 1024) throw fail('文件超出大小限制');
-  const image = await importImage(d, fs.readFileSync(input), path.basename(input));
+  const isVideo = videoExtension.test(input);
+  if (!stat.isFile() || stat.size > (isVideo ? 2 * 1024 ** 3 : 160 * 1024 ** 2))
+    throw fail('文件超出大小限制');
+  queuedLocalWork++;
+  let image: CanvasImage;
+  try {
+    image = isVideo
+      ? await importVideo(d, input, path.basename(input), app.locals.videoWorker || worker)
+      : await importImage(d, fs.readFileSync(input), path.basename(input));
+  } finally {
+    queuedLocalWork--;
+  }
   const fresh = load(d.id);
+  if (fresh.images.length >= 100) throw fail('画布节点已达100个');
   history(fresh);
   fresh.images.push(image);
   fresh.revision++;
@@ -314,12 +457,82 @@ app.post('/api/document/:id/import-path', internal, async (req, res) => {
 });
 externalVectorRoutes(app);
 app.get('/api/cutout-defaults', (_req, res) => res.json(readCutoutDefaults()));
+app.get('/api/upscale-status', async (_req, res) =>
+  res.json(
+    await worker(['upscale-status', '--model', 'seedvr2-7b-int8']).catch((e: Error) => ({
+      available: false,
+      message: e.message,
+    })),
+  ),
+);
+app.get('/api/upscale-defaults', (_req, res) => res.json(readUpscaleDefaults()));
+app.put('/api/upscale-defaults', (req, res) => res.json(saveUpscaleDefaults(req.body)));
+app.get('/api/matting-defaults', (_req, res) => res.json(readMattingDefaults()));
+app.put('/api/matting-defaults', (req, res) => res.json(saveMattingDefaults(req.body)));
 app.put('/api/cutout-defaults', (req, res) => res.json(saveCutoutDefaults(req.body)));
 app.get('/api/settings', async (_req, res) =>
   res.json({ ...keyStatus(), models: await modelStatus() }),
 );
 app.put('/api/settings', async (req, res) => res.json(await updateKeys(req.body)));
 app.get('/api/adobe', (_req, res) => res.json(adobe.publicSettings()));
+app.get('/api/photoshop-defaults', (_req, res) => res.json(readPhotoshopDefaults()));
+app.put('/api/photoshop-defaults', (req, res) => res.json(savePhotoshopDefaults(req.body)));
+app.post('/api/jobs/:id/generation', internal, async (req, res) => {
+  const j = boundJob(req);
+  if (!['layer', 'revise', 'photoshop'].includes(j.type)) throw fail('此任务不使用图层生成');
+  if (j.status !== 'running' && req.body.action !== 'status') throw fail('请先领取任务，已停止任务不能继续写入', 409);
+  res.json(await generationAction(j, req.body, j.type === 'photoshop' ? photoshopState(j).plan : undefined));
+});
+app.post('/api/jobs/:id/ps-rebuild', internal, async (req, res) => {
+  const j = boundJob(req);
+  if (j.type !== 'photoshop') throw fail('此操作仅用于PS重建');
+  const result = await photoshopAction(j, req.body, adobe);
+  if (req.body.action !== 'status') {
+    const fresh = getJob(j.id);
+    fresh.message =
+      (
+        {
+          plan: '逐层重建计划已保存',
+          material: '正在检查素材，准备按原始细节合成',
+          'upscale-material':'已确认构图，正在超分素材',
+          inspect: 'PS实际渲染已就绪，等待视觉检查',
+          review: '正在逐层检查一致性',
+          'review-composite': '整图检查已记录，等待回传',
+        } as Record<string, string>
+      )[req.body.action] || fresh.message;
+    saveJob(fresh);
+  }
+  res.json(result);
+  if (['material','upscale-material'].includes(req.body.action)) {
+    queuedLocalWork++;
+    mattingQueue = mattingQueue
+      .then(async () => {
+        if (getJob(j.id).status !== 'running') return;
+        const controller = new AbortController();
+        aborters.set(j.id, controller);
+        try {
+          await processPhotoshopMaterial(getJob(j.id), req.body.layerId, controller.signal);
+          const updated = getJob(j.id);
+          if (updated.status === 'running') {
+            updated.message = '素材已准备，继续PS合成与检查';
+            saveJob(updated);
+          }
+        } catch (e) {
+          const state = photoshopState(j);
+          if (state.materials[req.body.layerId]) {
+            state.materials[req.body.layerId].status = 'failed';
+            state.materials[req.body.layerId].error = String(e);
+            atomic(path.join(photoshopFolder(j), 'photoshop-rebuild.json'), state);
+          }
+        } finally {
+          aborters.delete(j.id);
+        }
+      })
+      .finally(() => {
+        queuedLocalWork--;
+      });
+  }
+});
 app.patch('/api/adobe', async (req, res) => res.json(await adobe.configure(req.body)));
 app.post('/api/adobe/probe', async (req, res) => {
   if (!['photoshop', 'illustrator'].includes(req.body.app)) throw fail('未知 Adobe 应用');
@@ -404,7 +617,30 @@ app.post('/api/document/:id/jobs', async (req, res) => {
   const d = load(String(req.params.id));
   const input = jobSchema.parse(req.body);
   const im = d.images.find((i) => i.id === input.imageId);
-  if (!im) throw fail('请选择图片');
+  if (!im) throw fail('请选择图片或视频');
+  if (im.nativePsd && ['revise', 'layer'].includes(input.type)) input.type = 'photoshop';
+  if (
+    input.type === 'photoshop' &&
+    input.layerIds?.length &&
+    im.layers.some((l) => !input.layerIds!.includes(l.id) && l.preview)
+  )
+    throw fail(
+      '其他建议图层尚未重建，不能在局部PS任务中把它们当成完成图层。请取消图层选择，交接整张预分层图片。',
+    );
+  if (im.mediaType === 'video' && input.type !== 'upscale')
+    throw fail('视频当前支持超分，请使用超分按钮');
+  if (
+    ['cutout', 'upscale'].includes(input.type) &&
+    (input.layerIds?.length || input.useOriginal || input.useVectorLayers)
+  )
+    throw fail('独立抠图和超分只处理当前图片节点的实际画面，请选择图片后提交');
+  if (input.type === 'upscale') {
+    try {
+      upscaleDimensions(im.width, im.height, d.settings.upscale || readUpscaleDefaults());
+    } catch (e: any) {
+      throw fail(e.message);
+    }
+  }
   if (
     jobs().some(
       (j) =>
@@ -433,12 +669,30 @@ app.post('/api/document/:id/jobs', async (req, res) => {
     taskId: d.taskId,
     imageId: im.id,
     type: input.type,
-    status: input.type === 'vectorize' ? 'queued' : 'waiting_codex',
-    message: input.type === 'vectorize' ? '等待矢量化' : '等待当前 Codex 对话领取并执行',
+    status: ['vectorize', 'cutout', 'upscale'].includes(input.type) ? 'queued' : 'waiting_codex',
+    message:
+      input.type === 'upscale'
+        ? `等待本地 ${upscaleModelName(d.settings.upscale)} 超分 · 不消耗 Codex 额度`
+        : input.type === 'cutout'
+          ? '等待本地精细抠图 · 不消耗 Codex 额度'
+          : input.type === 'vectorize'
+            ? '等待矢量化'
+            : '等待当前 Codex 对话领取并执行',
     createdAt: now(),
     version: im.version,
     mode: input.mode || d.settings.psdMode,
     cutoutOptions: structuredClone(d.settings.cutoutOptions || DEFAULT_CUTOUT),
+    upscale: ['upscale', 'photoshop'].includes(input.type)
+      ? structuredClone(d.settings.upscale || readUpscaleDefaults())
+      : undefined,
+    matting:
+      input.type === 'cutout'
+        ? structuredClone(d.settings.matting || readMattingDefaults())
+        : undefined,
+    photoshop:
+      input.type === 'photoshop'
+        ? structuredClone(d.settings.photoshop || readPhotoshopDefaults())
+        : undefined,
     engine: input.engine || d.settings.vectorEngine,
     webMode: d.settings.vectorizerComMode || 'auto',
     layerIds: input.useOriginal ? undefined : input.layerIds,
@@ -448,11 +702,25 @@ app.post('/api/document/:id/jobs', async (req, res) => {
       input.useVectorLayers ? { ...im, layers: im.vectorLayers || im.layers } : im,
     ),
   };
+  if (job.snapshot.nativePsd) job.snapshot.source = job.snapshot.url;
   if (
-    ['layer', 'revise'].includes(job.type) &&
-    (im.status === 'preview' || im.layers.some((l) => l.preview))
+    ['layer', 'revise', 'photoshop'].includes(job.type) &&
+    job.snapshot.layers.length &&
+    !job.useOriginal
   ) {
+    // Explicitly selected layers are an intentional edit; whole-node revisions skip kept results.
+    if (job.type === 'revise' && im.status !== 'preview' && !job.layerIds?.length) {
+      const targets = job.snapshot.layers.filter((l) => l.disposition === 'rebuild' || l.preview);
+      if (!targets.length)
+        throw fail('所有图层均标记为保留。请把需要修改的层设为重建，或选中该层再提交。');
+      if (targets.length < job.snapshot.layers.length) {
+        job.layerIds = targets.map((l) => l.id);
+        job.preserveKeptLayers = true;
+      }
+    }
     job.frameContractVersion = 1;
+    job.reconstructionVersion = 3;
+    job.reconstructionWorkflowVersion = 4;
     job.snapshot.layers = job.snapshot.layers.map((l) => ({
       ...l,
       frame: layerFrame(l, job.snapshot),
@@ -462,12 +730,17 @@ app.post('/api/document/:id/jobs', async (req, res) => {
     job.message = isCodexWeb(job) ? '等待当前 Codex 对话操作网页' : '等待自动网页转换';
     if (isCodexWeb(job)) job.status = 'waiting_codex';
   }
+  if (job.type === 'photoshop') {
+    job.reconstructionVersion = 3;
+    job.reconstructionWorkflowVersion = 4;
+  }
   prepareDispatch(job);
   saveJob(job);
   notifyRequests(job.taskId);
   res.status(202).json(safeJob(job));
   if (needsCodex(job)) setImmediate(() => void dispatchJob(job.id, app.locals.codexSender));
   if (job.type === 'vectorize' && !isCodexWeb(job)) setImmediate(() => enqueueVectorJob(job.id));
+  if (['cutout', 'upscale'].includes(job.type)) setImmediate(() => enqueueMattingJob(job.id));
 });
 app.post('/api/jobs/:id/cancel', (req, res) => {
   const j = getJob(String(req.params.id));
@@ -479,6 +752,8 @@ app.post('/api/jobs/:id/cancel', (req, res) => {
 });
 app.post('/api/jobs/:id/claim', internal, (req, res) => {
   const j = boundJob(req);
+  if (['cutout', 'upscale'].includes(j.type))
+    throw fail('本地图片任务由模型自动执行，无需 Codex 领取', 409);
   if (j.type === 'vectorize' && !isCodexWeb(j))
     throw fail('矢量化由所选引擎或网页文件导回完成，不由 Codex 领取', 409);
   if (j.mode === 1) throw fail('方案1已移除，请取消历史任务后选择方案2或3重新提交', 409);
@@ -495,14 +770,113 @@ app.post('/api/jobs/:id/fail', internal, (req, res) => {
   j.message = String(req.body.message || '执行失败').slice(0, 2000);
   res.json(safeJob(saveJob(j)));
 });
+app.post('/api/jobs/:id/resume', internal, (req, res) => {
+  // An explicit same-job continuation preserves candidate/prompt provenance.
+  // Never silently undo a cancellation or dispatch a new inference request.
+  const j = getJob(String(req.params.id));
+  if (req.body.taskId !== j.taskId) throw fail('任务与当前对话不匹配', 403);
+  if (!['layer', 'revise', 'photoshop'].includes(j.type))
+    throw fail('只有分层、修改和PS重建任务支持从检查点恢复', 409);
+  if (!['failed', 'cancelled'].includes(j.status))
+    throw fail('只能恢复已失败任务；已完成或执行中的任务不能重复恢复', 409);
+  const reason = typeof req.body.reason === 'string' ? req.body.reason.trim() : '';
+  if (!reason || reason.length > 2000) throw fail('请说明恢复原因（1至2000字）');
+  if (j.status === 'cancelled' && req.body.confirmCancelled !== true)
+    throw fail('该任务已明确取消；只有用户重新授权并显式确认后才能恢复', 409);
+  if (aborters.has(j.id) || (j.type === 'photoshop' && queuedLocalWork > 0))
+    throw fail('后台仍有操作尚未退出，请等待后再恢复，避免重复执行', 409);
+  const d = load(j.documentId);
+  if (d.taskId !== j.taskId) throw fail('画布与任务对话不匹配', 403);
+  const source = d.images.find(image => image.id === j.imageId);
+  if (!source || source.version !== j.version)
+    throw fail('原节点已移除或修改，不能把旧检查点用于新版本', 409);
+  if (d.images.some(image => image.sourceJobId === j.id))
+    throw fail('该任务已有结果节点，不能再次恢复并重复回传', 409);
+  if (jobs().some(other => other.id !== j.id && other.documentId === j.documentId &&
+      other.imageId === j.imageId && ['running', 'queued', 'waiting_codex'].includes(other.status)))
+    throw fail('该节点已有其他待处理任务，请先完成或取消后再恢复', 409);
+  const folder = path.join(dir(j.documentId), 'jobs', j.id);
+  const fileExists = (file: unknown) => {
+    try { return typeof file === 'string' && fs.statSync(file).isFile(); } catch { return false; }
+  };
+  const generation = generationState(j);
+  const registered = generation.outputs.filter(output =>
+    fileExists(output.originalPath) && fileExists(output.workingPath) &&
+    generation.requests.some(request => request.id === output.requestId));
+  const staged = json<Layer[]>(path.join(folder, 'staged-layers.json'), []).filter(layer => {
+    try { return !layer.preview && !!layer.url && fileExists(assetPath(j.documentId, layer.url)); }
+    catch { return false; }
+  });
+  const ps = j.type === 'photoshop' ? photoshopState(j) : undefined;
+  const psMaterials = Object.values(ps?.materials || {}).filter(material => fileExists(material.path));
+  const psInspection = !!ps?.inspection && fileExists(ps.inspection.psdPath);
+  let nativePrepared: { path: string; hash: string; layerIds: string[]; plan: unknown } | undefined;
+  if (req.body.nativeArtifactPath !== undefined) {
+    if (j.type !== 'photoshop' || j.reconstructionVersion !== 3 || j.reconstructionWorkflowVersion !== 4 ||
+        typeof req.body.nativeArtifactPath !== 'string' || !req.body.nativeArtifactPath.trim() || !ps?.plan)
+      throw fail('nativeArtifactPath仅用于本次新v4 PS原生薄膜/实体几何准备文件恢复', 400);
+    const plan = validatePhotoshopPlan(j, ps.plan), canvas = plan.canvas!;
+    if (canvas.width * canvas.height > 1_500_000) throw fail('原生薄膜恢复工作画布不得超过150万像素', 400);
+    const artifact = taskPsd(folder, req.body.nativeArtifactPath);
+    const ready = nativeProgressLayers(fs.readFileSync(artifact), plan, canvas).filter(l => l.nativeFilm || l.nativeGeometry);
+    if (!ready.length) throw fail('原生薄膜准备文件缺少匹配冻结配方的实际可编辑内容', 409);
+    nativePrepared = { path: artifact, hash: fileHash(artifact), layerIds: ready.map(l => l.layerId), plan };
+  }
+  if (!registered.length && !staged.length && !psMaterials.length && !psInspection && !nativePrepared)
+    throw fail('没有可恢复的登记原件、暂存图层或PS检查点；请重新发起任务', 409);
+  const checkpoints = { registered: registered.length, staged: staged.length, psMaterials: psMaterials.length, psInspection,
+    ...(nativePrepared ? { psNativePrepared: nativePrepared.layerIds.length } : {}) };
+  const historyFile = path.join(folder, 'resume-history.json');
+  const history = json<unknown[]>(historyFile, []);
+  atomic(historyFile, [...history, { at: now(), from: j.status, reason, confirmedCancellation: j.status === 'cancelled', checkpoints,
+    ...(nativePrepared ? { nativePrepared } : {}) }]);
+  j.status = 'running';
+  j.dispatch = { state: 'received', updatedAt: now() };
+  j.message = '已从原任务检查点恢复；复用登记原件，继续检查和未完成步骤';
+  res.json({ job: safeJob(saveJob(j)), checkpoints });
+});
 app.get('/api/jobs/:id/packet', internal, async (req, res) => {
   const j = getJob(String(req.params.id));
   if (String(req.query.taskId || '') !== j.taskId) throw fail('对话不匹配', 403);
-  const sourcePath = assetPath(j.documentId, j.snapshot.source);
+  const sourcePath = assetPath(j.documentId, j.snapshot.status==='preview'?j.snapshot.source:j.snapshot.url||j.snapshot.source);
   const original = originalReference(j.documentId, j.snapshot);
   const originalSourcePath = original.path;
   const inputs = reconstructionInputs(j.documentId, j.snapshot, originalSourcePath);
   const layers = inputs.layers;
+  const psPlan = j.type === 'photoshop' ? photoshopState(j).plan : undefined;
+  const contract = frameContract(
+    psPlan && !j.snapshot.layers.length
+      ? {
+          ...j,
+          frameContractVersion: 1,
+          snapshot: {
+            ...j.snapshot,
+            layers: psPlan.layers.map((l) => ({
+              id: l.layerId,
+              name: l.name,
+              kind: 'plan' as const,
+              preview: true as const,
+              frame: scaledFrame(
+                l.frame,
+                j.snapshot.width / (psPlan.canvas?.width || j.snapshot.width),
+                j.snapshot.height / (psPlan.canvas?.height || j.snapshot.height),
+              ),
+              ...l.frame,
+              visible: true,
+              opacity: 1,
+              opinion: l.includes,
+              disposition: 'rebuild' as const,
+            })),
+          },
+        }
+      : j,
+    psPlan?.canvas ||
+      (req.query.generationPlan ? JSON.parse(String(req.query.generationPlan)) : undefined),
+  );
+  const localReferences = await reconstructionCrops(j, contract, originalSourcePath, sourcePath);
+  inputs.generationInputs.allowedImagePaths.push(
+    ...localReferences.flatMap((r) => (r.path ? [r.path] : [])),
+  );
   const packet = {
     cutout: cutoutPacket(j),
     executionScope: {
@@ -510,6 +884,10 @@ app.get('/api/jobs/:id/packet', internal, async (req, res) => {
       nodeOnly: true,
       traverseAncestors: false,
       traverseDescendants: false,
+      targetLayerIds: j.layerIds || layers.map((l) => l.id),
+      preservedLayerIds: j.layerIds
+        ? layers.filter((l) => !j.layerIds!.includes(l.id)).map((l) => l.id)
+        : [],
     },
     webVector: await webVectorPacket(j),
     prompt: ['photoshop', 'illustrator'].includes(j.type)
@@ -518,10 +896,17 @@ app.get('/api/jobs/:id/packet', internal, async (req, res) => {
     job: safeJob(j),
     image: inputs.image,
     generationInputs: inputs.generationInputs,
-    frameContract: frameContract(
-      j,
-      req.query.generationPlan ? JSON.parse(String(req.query.generationPlan)) : undefined,
-    ),
+    localReferences,
+    generationProtocol: j.reconstructionVersion === 3 ? {
+      version: j.reconstructionWorkflowVersion||3, pixelBudget: 1500000, tool: 'canvas_generation',
+      instruction: j.reconstructionWorkflowVersion===4 ? '先读RECONSTRUCTION.md。普通任务先layout列出全部目标层元素唯一归属、排除项、参考anchors和接触/遮挡relations；PS在plan内填写。独立层可分别prepare和生成，返回立即register保存检查点；有遮挡/接触关系的层按组composite检查，最终统一review及整图验收。不要为每个独立层重复读取完整项目或编写临时脚本。150万预算含承载画幅留白；frame是设计边界，placementFrame是完整素材实际放置边界。align只能引用冻结anchorNames，不能迁就输出改参考目标。review须evidence三项具体观察和真实candidateIds；错误API不算纠正。最后composite及review-composite覆盖所有层和relations再complete。PS先原素材合成并inspect/review通过，再upscale-material、重新置入和审核。' : '每层prepare→image_gen→register原件→检查→review→complete；旧任务保持兼容。',
+      state: generationSummary(j),
+    } : undefined,
+    reviewPolicy: ['layer', 'revise', 'photoshop'].includes(j.type)
+      ? RECONSTRUCTION_REVIEW_POLICY
+      : undefined,
+    photoshop: j.type === 'photoshop' ? photoshopPacket(j) : undefined,
+    frameContract: contract,
     stagedLayers: json<Layer[]>(
       path.join(dir(j.documentId), 'jobs', j.id, 'staged-layers.json'),
       [],
@@ -536,7 +921,11 @@ app.get('/api/jobs/:id/packet', internal, async (req, res) => {
     sourcePath,
     originalSourcePath,
     originalReference: original,
-    referencePolicy: RECONSTRUCTION_POLICY,
+    referencePolicy: j.type === 'photoshop' ? PHOTOSHOP_REFERENCE_POLICY : RECONSTRUCTION_POLICY,
+    nativePsdPath:
+      j.snapshot.nativePsd && j.snapshot.psdSource
+        ? assetPath(j.documentId, j.snapshot.psdSource)
+        : undefined,
     layers,
     annotations: j.snapshot.annotations,
     coordinateAnnotations: await annotationPacket(
@@ -556,6 +945,8 @@ app.get('/api/jobs/:id/packet', internal, async (req, res) => {
         ? {
             mode: j.mode === 3 ? 'bounds-only' : 'local-cutout',
             generationAllowed: false,
+            occlusionPolicy:
+              '按真实遮挡关系规划，不只按语义类别分组。远景与遮挡人物/产品的前景桌面不能同放最底层；同一类内容若分别位于某物体前后，应拆开。检查台面接触、人物/衣物下沿、反射、细弧线和独立光效，避免漏层形成直线截断。',
             instruction:
               j.mode === 3
                 ? '只查看干净图片并提交名称、box、role、意见和底到顶顺序。严禁调用 image_gen 或生成任何预览图片；用户确认后才真实重建。'
@@ -697,6 +1088,11 @@ app.post('/api/jobs/:id/plan', internal, async (req, res) => {
 });
 app.post('/api/jobs/:id/apply', internal, async (req, res) => {
   const j = boundJob(req);
+  const derivedIds = Array.isArray(req.body.layers) ? req.body.layers.map((l: { generationId?: string }) => l.generationId).filter(Boolean) : [];
+  await prepareGeneratedRoleConsumer(j, derivedIds);
+  const derivedConsumer = captureDerivedConsumer(j, derivedIds);
+  if (['cutout', 'upscale'].includes(j.type))
+    throw fail('本地图片任务由模型回传，不能作为生成分层任务提交', 409);
   if (req.body.stageOnly !== undefined && typeof req.body.stageOnly !== 'boolean')
     throw fail('暂存标记必须是布尔值');
   if (j.type === 'plan')
@@ -712,7 +1108,20 @@ app.post('/api/jobs/:id/apply', internal, async (req, res) => {
   if (isCodexWeb(j)) throw fail('网页矢量任务请通过 canvas_web_vector 回传，以保持图层对应关系');
   if (req.body.baseVersion !== j.version) throw fail('版本不匹配', 409);
   imageFor(j);
+  if (j.type === 'photoshop') {
+    if (j.status !== 'running' || req.body.stageOnly) throw fail('PS重建需运行中的完整结果回传');
+    const { image, review } = await completePhotoshop(j, String(req.body.artifactPath || ''));
+    const document = commitImage(j, image);
+    j.status = 'completed';
+    j.message = review.pending
+      ? `PS结果已返回；${review.pending}个图层已标红待修改`
+      : 'PS分层重建与检查已完成，结果已返回画布';
+    j.result = { ...((j.result as object) || {}), artifactUrl: image.psdSource, review };
+    saveJob(j);
+    return res.json({ job: safeJob(j), document });
+  }
   let resultLayers: Layer[] | undefined;
+  let reviewSummary: { pending: number; unreviewed: number } | undefined;
   let artifactUrl: string | undefined;
   let outputWidth = req.body.width,
     outputHeight = req.body.height;
@@ -773,6 +1182,7 @@ app.post('/api/jobs/:id/apply', internal, async (req, res) => {
     checkDimensions(outputWidth, outputHeight);
   if (
     j.layerIds?.length &&
+    !j.preserveKeptLayers &&
     ((outputWidth !== undefined && outputWidth !== j.snapshot.width) ||
       (outputHeight !== undefined && outputHeight !== j.snapshot.height))
   )
@@ -797,6 +1207,7 @@ app.post('/api/jobs/:id/apply', internal, async (req, res) => {
     );
   if (req.body.stageOnly === true) {
     imageFor(j);
+    verifyDerivedConsumer(j, derivedConsumer, derivedIds);
     return res.json({
       staged: true,
       completed: false,
@@ -804,6 +1215,8 @@ app.post('/api/jobs/:id/apply', internal, async (req, res) => {
       message: '图层已暂存；请检查适配图与整体对齐，全部完成后再正式回传',
     });
   }
+  if(j.reconstructionWorkflowVersion===4&&['layer','revise'].includes(j.type))
+    requireCompositeApproval(j,resultLayers.map(l=>l.generationId!),generationState(j));
   let { d, im } = imageFor(j);
   if (resultLayers) {
     const toVector = j.useVectorLayers || j.type === 'illustrator' || !!req.body.vectorSvg;
@@ -812,6 +1225,24 @@ app.post('/api/jobs/:id/apply', internal, async (req, res) => {
       checkDimensions(outputWidth, outputHeight);
       const sx = outputWidth / im.width,
         sy = outputHeight / im.height;
+      if (j.preserveKeptLayers) {
+        im.layers = im.layers.map((l) => {
+          if (j.layerIds!.includes(l.id)) return l;
+          const next = {
+            ...l,
+            ...scaledFrame(l, sx, sy),
+            frame: scaledFrame(layerFrame(l, im), sx, sy),
+          };
+          if (next.text)
+            next.text = {
+              ...next.text,
+              x: next.text.x * sx,
+              y: next.text.y * sy,
+              fontSize: next.text.fontSize * Math.sqrt(sx * sy),
+            };
+          return next;
+        });
+      }
       im.annotations = im.annotations.map((a) => ({
         ...a,
         points: a.points.map((v, i) => v * (i % 2 ? sy : sx)),
@@ -868,6 +1299,8 @@ app.post('/api/jobs/:id/apply', internal, async (req, res) => {
         ? 'vector'
         : 'layered';
     im.psdSource = req.body.psdSource;
+    if (['layer', 'revise'].includes(j.type))
+      reviewSummary = applyLayerReviews(im, resultLayers, j.snapshot);
     im.artifactUrl = artifactUrl;
     if (im.status === 'vector')
       im.vectorUrl = writeAsset(d.id, Buffer.from(exportSvg(d.id, im)), '.svg');
@@ -878,20 +1311,120 @@ app.post('/api/jobs/:id/apply', internal, async (req, res) => {
       '.png',
     );
     if (im.status !== 'preview') im.source = im.url;
+    verifyDerivedConsumer(j, derivedConsumer, derivedIds);
     d = commitImage(j, im);
   }
   if (getJob(j.id).status === 'cancelled') throw fail('请求已取消', 409);
   j.status = 'completed';
   j.message = String(req.body.message || '产物已返回画布');
+  if (reviewSummary) {
+    j.message += reviewSummary.pending ? `；${reviewSummary.pending} 个图层已标红待修改` : '';
+    j.message += reviewSummary.unreviewed
+      ? `；${reviewSummary.unreviewed} 个图层未提交视觉检查，保持重建状态`
+      : '';
+  }
   j.result = { ...((j.result as object) || {}), artifactUrl };
   saveJob(j);
   res.json({ job: safeJob(j), document: d });
 });
+let mattingQueue: Promise<void> = Promise.resolve();
+function enqueueMattingJob(id: string) {
+  queuedLocalWork++;
+  mattingQueue = mattingQueue
+    .then(() => (getJob(id).type === 'upscale' ? runUpscaleJob(id) : runMattingJob(id)))
+    .catch(() => {})
+    .finally(() => {
+      queuedLocalWork--;
+    });
+}
+export async function runMattingJob(id: string) {
+  const j = getJob(id);
+  if (j.type !== 'cutout' || j.status !== 'queued') return;
+  const controller = new AbortController();
+  aborters.set(id, controller);
+  try {
+    j.status = 'running';
+    j.message = `正在使用 ${j.matting?.model === 'lucida' ? 'Lucida v7' : 'BiRefNet HR-matting'} 本地精细抠图 · 不消耗 Codex 额度`;
+    saveJob(j);
+    const result = await standaloneMatting(
+      j,
+      app.locals.mattingWorker || worker,
+      controller.signal,
+    );
+    controller.signal.throwIfAborted();
+    if (getJob(id).status !== 'running') return;
+    commitImage(j, result.image);
+    j.status = 'completed';
+    j.message = `精细抠图已返回画布 · 不消耗 Codex 额度${result.warnings.length ? '；' + result.warnings.join('；') : ''}`;
+    j.result = {
+      ...(j.result as object),
+      model: j.matting?.model,
+      execution: result.execution,
+      seconds: result.seconds,
+    };
+    saveJob(j);
+  } catch (e: any) {
+    if (getJob(id).status !== 'cancelled') {
+      j.status = 'failed';
+      j.message = `精细抠图失败：${String(e.message).slice(0, 1800)}。原图片已保留；可检查模型安装、尝试另一模型或切换 CPU。`;
+      saveJob(j);
+    }
+  } finally {
+    aborters.delete(id);
+  }
+}
+export async function runUpscaleJob(id: string) {
+  const j = getJob(id);
+  if (j.type !== 'upscale' || j.status !== 'queued') return;
+  const controller = new AbortController();
+  aborters.set(id, controller);
+  try {
+    j.status = 'running';
+    j.message = `正在使用 ${upscaleModelName(j.upscale)} 本地超分 · 不消耗 Codex 额度`;
+    saveJob(j);
+    const result = await upscaleImage(
+      j,
+      app.locals.upscaleWorker || worker,
+      controller.signal,
+      (message) => {
+        if (getJob(id).status === 'running') {
+          j.message = message + ' · 本地执行，不消耗 Codex 额度';
+          saveJob(j);
+        }
+      },
+    );
+    controller.signal.throwIfAborted();
+    if (getJob(id).status !== 'running') return;
+    commitImage(j, result.image);
+    j.status = 'completed';
+    j.message = `超分已返回画布 · 不消耗 Codex 额度${result.warnings.length ? '；' + result.warnings.join('；') : ''}`;
+    j.result = {
+      ...(j.result as object),
+      model: upscaleModelName(j.upscale),
+      execution: result.execution,
+      seconds: result.seconds,
+    };
+    saveJob(j);
+  } catch (e: any) {
+    if (getJob(id).status !== 'cancelled') {
+      j.status = 'failed';
+      j.message = `超分失败：${String(e.message).slice(0, 1800)}。原图片已保留；可检查模型安装、减小编解码分块或降低倍率。`;
+      saveJob(j);
+    }
+  } finally {
+    aborters.delete(id);
+  }
+}
 let browserQueue: Promise<void> = Promise.resolve();
 function enqueueVectorJob(id: string) {
+  queuedLocalWork++;
+  const execute = () =>
+    runVectorJob(id).finally(() => {
+      queuedLocalWork--;
+    });
   if (getJob(id).engine === 'vectorizerCom') {
-    browserQueue = browserQueue.then(() => runVectorJob(id)).catch(() => {});
-  } else void runVectorJob(id);
+    browserQueue = browserQueue.then(execute).catch(() => {});
+  } else void execute().catch(() => {});
 }
 export async function runVectorJob(id: string, browserFactory = () => new VectorizerBrowser()) {
   let browser: VectorizerBrowser | undefined;
@@ -1014,33 +1547,46 @@ export async function runVectorJob(id: string, browserFactory = () => new Vector
   }
 }
 app.get('/api/document/:id/export', async (req, res) => {
-  const d = load(String(req.params.id));
-  const im = d.images.find((i) => i.id === req.query.imageId);
-  const format = String(req.query.format);
-  if (!im) throw fail('图片不存在');
-  const filename = im.name.replace(/\.[^.]+$/, '').replace(/[\x00-\x1f"\\/]/g, '_');
-  res.setHeader(
-    'Content-Disposition',
-    `attachment; filename*=UTF-8''${encodeURIComponent(filename + '.' + (format === 'project' ? 'json' : format))}`,
-  );
-  if (format === 'psd') {
-    if (im.status === 'preview' || im.layers.some((l) => l.preview))
-      throw fail('预分层不是真实分层，请先确认完成分层');
-    res.type('application/octet-stream').send(await exportPsd(d.id, im));
-  } else if (format === 'png')
-    res.type('png').send(
-      req.query.view === 'original'
-        ? await sharp(fs.readFileSync(assetPath(d.id, im.source)))
-            .png()
-            .toBuffer()
-        : await renderImage(
-            d.id,
-            req.query.view === 'vector' ? { ...im, layers: im.vectorLayers || im.layers } : im,
-          ),
+  queuedLocalWork++;
+  try {
+    const d = load(String(req.params.id));
+    const im = d.images.find((i) => i.id === req.query.imageId);
+    const format = String(req.query.format);
+    if (!im) throw fail('图片不存在');
+    const filename = im.name.replace(/\.[^.]+$/, '').replace(/[\x00-\x1f"\\/]/g, '_');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename*=UTF-8''${encodeURIComponent(filename + '.' + (format === 'project' ? 'json' : format))}`,
     );
-  else if (format === 'svg') res.type('image/svg+xml').send(exportSvg(d.id, im));
-  else if (format === 'project') res.json(d);
-  else throw fail('支持 PSD、SVG、PNG、项目 JSON；原生 AI 请交接 Illustrator');
+    if (im.mediaType === 'video' && !['mp4', 'project'].includes(format))
+      throw fail('视频支持导出 MP4 或项目 JSON');
+    if (format === 'mp4') {
+      if (im.mediaType !== 'video' || !im.video || !im.artifactUrl)
+        throw fail('请选择超分视频结果；原视频请使用原文件下载');
+      res.type('video/mp4').sendFile(assetPath(d.id, im.artifactUrl));
+    } else if (format === 'psd') {
+      if (im.status === 'preview' || im.layers.some((l) => l.preview))
+        throw fail('预分层不是真实分层，请先确认完成分层');
+      if (!im.nativePsd && im.layers.some((l) => l.kind === 'vector'))
+        res.setHeader('X-Canvas-Export-Notice', 'SVG layers are rasterized in this PSD; export SVG for editable vectors.');
+      res.type('application/octet-stream').send(await exportPsd(d.id, im));
+    } else if (format === 'png')
+      res.type('png').send(
+        req.query.view === 'original'
+          ? await sharp(fs.readFileSync(assetPath(d.id, im.source)))
+              .png()
+              .toBuffer()
+          : await renderImage(
+              d.id,
+              req.query.view === 'vector' ? { ...im, layers: im.vectorLayers || im.layers } : im,
+            ),
+      );
+    else if (format === 'svg') res.type('image/svg+xml').send(exportSvg(d.id, im));
+    else if (format === 'project') res.json(d);
+    else throw fail('支持 PSD、SVG、PNG、项目 JSON；原生 AI 请交接 Illustrator');
+  } finally {
+    queuedLocalWork--;
+  }
 });
 app.use(express.static(path.join(ROOT, 'dist')));
 app.get('/', (_req, res) => res.sendFile(path.join(ROOT, 'dist', 'index.html')));
@@ -1051,63 +1597,96 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
     .json({ error: err.name === 'ZodError' ? '输入格式不正确' : err.message || '操作失败' });
 });
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  let attempts = 0;
-  const listen = () => {
-    const listener = app.listen(PORT, '127.0.0.1', () => {
-      atomic(path.join(DATA, 'service.json'), {
-        port: PORT,
-        token: TOKEN,
-        bridgeToken: BRIDGE_TOKEN,
-        root: ROOT,
-        pid: process.pid,
+  const releaseLock = acquireServiceLock(DATA);
+  if (!releaseLock) {
+    console.log('已有画布服务正在启动或运行，将复用该服务。');
+  } else {
+    process.once('exit', releaseLock);
+    let attempts = 0;
+    const listen = () => {
+      const listener = app.listen(PORT, '127.0.0.1', () => {
+        atomic(path.join(DATA, 'service.json'), {
+          port: PORT,
+          token: TOKEN,
+          bridgeToken: BRIDGE_TOKEN,
+          root: ROOT,
+          pid: process.pid,
+        });
+        for (const j of jobs()) {
+          if (j.status === 'waiting_codex' && !j.dispatch) {
+            j.status = 'failed';
+            j.message = '旧版请求未自动发送到对话；请重新点击功能按钮，原图及意见已保留';
+            saveJob(j);
+          }
+          if (j.status === 'waiting_codex' && j.dispatch?.state === 'sending') {
+            j.dispatch = {
+              state: 'uncertain',
+              updatedAt: now(),
+              detail: '发送过程中服务重启，无法确认回执；不会自动重复发送',
+            };
+            j.message = '发送回执暂未确认';
+            saveJob(j);
+          }
+          if (j.status === 'running' && isCodexWeb(j)) {
+            j.webProgress = { ...j.webProgress, phase: 'blocked', updatedAt: now() };
+            j.message = '服务已恢复；等待当前对话继续接收已有网页结果，已下载文件保留';
+            saveJob(j);
+            continue;
+          }
+          if (['running', 'queued'].includes(j.status)) {
+            j.status = 'failed';
+            j.message = '服务重启，任务未完成，请重试';
+            saveJob(j);
+          }
+        }
+        console.log(`Layer Canvas listening on http://127.0.0.1:${PORT}`);
+        const tick = lifecycleGuard({
+          owners: () => hasCanvasOwners(DATA),
+          busy: () =>
+            activeRequests > 0 || aborters.size > 0 || queuedLocalWork > 0 || dispatchBusy(),
+          managed: process.env.LAYER_CANVAS_MANAGED === '1',
+          stop: () => {
+            clearInterval(timer);
+            console.log('Codex 已退出，当前本地任务及请求已完成，画布服务安全停止。');
+            // Keep service.json (port/token) and every document for the next launch.
+            listener.close(() => process.exit(0));
+            listener.closeIdleConnections();
+          },
+        });
+        const timer = setInterval(() => void tick(), 5000);
+        timer.unref();
+        void tick();
       });
-      for (const j of jobs()) {
-        if (j.status === 'waiting_codex' && !j.dispatch) {
-          j.status = 'failed';
-          j.message = '旧版请求未自动发送到对话；请重新点击功能按钮，原图及意见已保留';
-          saveJob(j);
+      listener.on('error', async (error: NodeJS.ErrnoException) => {
+        if (error.code === 'EADDRINUSE') {
+          try {
+            const response = await fetch(`http://127.0.0.1:${PORT}/api/health`, {
+              signal: AbortSignal.timeout(5000),
+            });
+            const health = await response.json();
+            if (response.ok && health.instanceId === serviceIdentity(ROOT, DATA)) return;
+          } catch {
+            /* a different app may occupy this port */
+          }
         }
-        if (j.status === 'waiting_codex' && j.dispatch?.state === 'sending') {
-          j.dispatch = {
-            state: 'uncertain',
-            updatedAt: now(),
-            detail: '发送过程中服务重启，无法确认回执；不会自动重复发送',
-          };
-          j.message = '发送回执暂未确认';
-          saveJob(j);
+        if (
+          error.code === 'EADDRINUSE' &&
+          !process.env.LAYER_CANVAS_PORT &&
+          attempts++ < 20 &&
+          PORT < 65535
+        ) {
+          PORT++;
+          listen();
+        } else {
+          console.error(
+            error.code === 'EADDRINUSE'
+              ? '指定画布端口已被占用，请更换 LAYER_CANVAS_PORT；未停止其他程序。'
+              : error.message,
+          );
+          process.exitCode = 1;
         }
-        if (j.status === 'running' && isCodexWeb(j)) {
-          j.webProgress = { ...j.webProgress, phase: 'blocked', updatedAt: now() };
-          j.message = '服务已恢复；等待当前对话继续接收已有网页结果，已下载文件保留';
-          saveJob(j);
-          continue;
-        }
-        if (['running', 'queued'].includes(j.status)) {
-          j.status = 'failed';
-          j.message = '服务重启，任务未完成，请重试';
-          saveJob(j);
-        }
-      }
-      console.log(`Layer Canvas listening on http://127.0.0.1:${PORT}`);
-    });
-    listener.on('error', (error: NodeJS.ErrnoException) => {
-      if (
-        error.code === 'EADDRINUSE' &&
-        !process.env.LAYER_CANVAS_PORT &&
-        attempts++ < 20 &&
-        PORT < 65535
-      ) {
-        PORT++;
-        listen();
-      } else {
-        console.error(
-          error.code === 'EADDRINUSE'
-            ? '指定画布端口已被占用，请更换 LAYER_CANVAS_PORT；未停止其他程序。'
-            : error.message,
-        );
-        process.exitCode = 1;
-      }
-    });
-  };
-  listen();
+      });
+    };
+    listen();
+  }
 }

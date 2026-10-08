@@ -1,8 +1,13 @@
 import fs from 'node:fs';
+import { readPhotoshopDefaults } from './photoshop-settings.js';
 import { readCutoutDefaults } from './cutout-settings.js';
+import { readUpscaleDefaults } from './upscale-settings.js';
+import { readMattingDefaults } from './matting-settings.js';
 import { DEFAULT_CUTOUT } from '../shared/cutout.js';
+import { upscaleSchema } from '../shared/upscale.js';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { replaceStagedFile } from './atomic-file.js';
 import type { Document, Job } from './types.js';
 export const ROOT = path.resolve(import.meta.dirname, '..');
 export const DATA = path.resolve(process.env.LAYER_CANVAS_DATA || path.join(ROOT, 'data'));
@@ -12,8 +17,8 @@ export const now = () => new Date().toISOString();
 export function atomic(file: string, value: unknown) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = file + '.' + uid() + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(value, null, 2), 'utf8');
-  fs.renameSync(tmp, file);
+  fs.writeFileSync(tmp, JSON.stringify(value, null, 2), { encoding: 'utf8', flag: 'wx' });
+  replaceStagedFile(tmp, file);
 }
 export function json<T>(file: string, fallback: T): T {
   try {
@@ -42,6 +47,9 @@ export function load(id: string): Document {
   }
   delete (d.settings as Document['settings'] & { vectorOptions?: unknown }).vectorOptions;
   d.settings.cutoutOptions ??= structuredClone(DEFAULT_CUTOUT);
+  d.settings.matting ??= readMattingDefaults();
+  d.settings.photoshop ??= readPhotoshopDefaults();
+  d.settings.upscale = upscaleSchema.parse(d.settings.upscale || readUpscaleDefaults());
   return d;
 }
 export function save(d: Document) {
@@ -62,7 +70,14 @@ export function getByTask(taskId: string) {
       taskId,
       revision: 0,
       images: [],
-      settings: { ...readCutoutDefaults(), vectorEngine: 'vectorizerCom', theme: 'dark' },
+      settings: {
+        photoshop: readPhotoshopDefaults(),
+        ...readCutoutDefaults(),
+        matting: readMattingDefaults(),
+        upscale: readUpscaleDefaults(),
+        vectorEngine: 'vectorizerCom',
+        theme: 'dark',
+      },
       layout: { layersWidth: 200, opinionsWidth: 320, editorHeight: 320 },
       updatedAt: now(),
     });

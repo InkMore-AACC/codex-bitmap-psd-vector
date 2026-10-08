@@ -1,12 +1,25 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { CodexStdioServerTransport } from './mcp-schema.js';
 import { z } from 'zod';
+import { layerReviewSchema } from '../shared/layer-review.js';
+import { photoshopActionSchema } from '../shared/photoshop.js';
+import { generationActionSchema } from '../shared/generation.js';
 import { CanvasClient } from './client.js';
+import { startCanvasLifecycle } from './lifecycle.js';
+import { compactGenerationResponse } from './generation-response.js';
 
 const client = new CanvasClient();
 const server = new McpServer({ name: 'layer-canvas', version: '0.1.0' });
 const task = { taskId: z.string().describe('当前真实 Codex task/thread ID。不得取其他任务 ID。') };
 const job = { ...task, jobId: z.string() };
+server.registerTool('canvas_generation', {
+ description:'v4逐层重建：先layout元素唯一归属、anchors/relations。prepare后按冻结路线当前image_gen/register或显式原生字体/简单四边形render-native-text/render-native-geometry，真实来源分别登记；关联组合检查和review。完整review-composite后complete。150万含留白预算；frame与placementFrame分开。status恢复。',
+ inputSchema:{...job,input:generationActionSchema},
+},({taskId,jobId,input})=>call(async()=>compactGenerationResponse(input.action,await client.mutateJob(taskId,jobId,'generation',input))));
+server.registerTool('canvas_ps_rebuild', {
+ description:'PS重建：plan冻结归属；material/place-material完整素材置入。render-native-film/geometry/plane-text分别按事前配方在空目标组制作真实可编辑薄膜/简单实体/字体新副本；fit-text辅助其他文字。inspect-progress中途预览；最终inspect真实渲染、review对照源，review-composite后回传完整PSD。',
+ inputSchema:{...job,input:photoshopActionSchema},
+},({taskId,jobId,input})=>call(()=>client.mutateJob(taskId,jobId,'ps-rebuild',input)));
 const psdStyle = z.object({
   stroke: z.object({ color: z.string().regex(/^#[0-9a-f]{6}$/i), size: z.number().min(0).max(500) }).optional(),
   shadow: z.object({ color: z.string().regex(/^#[0-9a-f]{6}$/i), blur: z.number().min(0).max(500), offsetX: z.number(), offsetY: z.number(), opacity: z.number().min(0).max(1) }).optional(),
@@ -61,7 +74,7 @@ server.registerTool('canvas_prepare_cutouts', {
 server.registerTool('canvas_complete_request', {
   description: '仅在完成真实生成/编辑并检查一致性后提交实际产物。结果新建来源关联节点；输入后有新意见时标记基于旧版，取消请求拒绝应用。不能把预览、排队或提示词标为生成完成。',
   inputSchema: { ...job, stageOnly:z.boolean().optional().describe('逐层暂存并适配，不完成任务、不新建节点；检查后再提交全部原始文件正式完成。'), baseVersion: z.number().int(), width: z.number().int().min(1).max(30000).optional().describe('总图输出像素宽度，尺寸变化时与height一起提供。'), height: z.number().int().min(1).max(30000).optional(), message: z.string().optional(), vectorSvg: z.string().optional(), artifactPath: z.string().optional().describe('实际保存并检查过的 PSD、SVG 或原生 AI 绝对路径。AI 建议同时回传 SVG 供画布预览。'),
-    layers: z.array(z.object({ id: z.string().optional(), sourceLayerIds:z.array(z.string()).min(1).max(300).optional().describe('合并图层时包含全部来源图层ID，输出画幅使用这些冻结frame的并集。'), name: z.string(), path: z.string().optional().describe('实际生图原始文件。frameContract存在时服务按实际尺寸及1%比例容差等比放大/缩小。不要自行拉伸或删细节。'), url: z.string().optional(), sourceCrop:z.object({x:z.number().int().nonnegative(),y:z.number().int().nonnegative(),width:z.number().int().positive(),height:z.number().int().positive()}).optional().describe('仅确认多余全透明留白时声明原始文件像素裁切框；裁掉任何非零alpha会拒绝。不能自动裁物体包围盒。'), x: z.number().default(0), y: z.number().default(0), width: z.number(), height: z.number(), kind: z.enum(['raster','text','vector']).default('raster'), opacity: z.number().min(0).max(1).default(1), visible: z.boolean().default(true), disposition: z.enum(['keep','rebuild']).default('keep'), opinion: z.string().default(''), textDirty: z.boolean().optional(), psdStyle: psdStyle.optional(), text: z.object({ value: z.string(), fontFamily: z.string(), fontSize: z.number(), color: z.string(), x: z.number(), y: z.number() }).optional() })).optional(),
+    layers: z.array(z.object({ id: z.string().optional(), generationId: z.string().optional().describe('v3必须传canvas_generation返回的登记ID，path传originalPath。'), sourceLayerIds:z.array(z.string()).min(1).max(300).optional(), name: z.string(), review: layerReviewSchema.optional(), path: z.string().optional(), url: z.string().optional(), sourceCrop:z.object({x:z.number().int().nonnegative(),y:z.number().int().nonnegative(),width:z.number().int().positive(),height:z.number().int().positive()}).optional(), x: z.number().default(0), y: z.number().default(0), width: z.number(), height: z.number(), kind: z.enum(['raster','text','vector']).default('raster'), opacity: z.number().min(0).max(1).default(1), blendMode: z.enum(['normal','screen']).optional(), visible: z.boolean().default(true), disposition: z.enum(['keep','rebuild']).default('keep'), opinion: z.string().default(''), textDirty: z.boolean().optional(), psdStyle: psdStyle.optional(), text: z.object({ value: z.string(), fontFamily: z.string(), fontSize: z.number(), color: z.string(), x: z.number(), y: z.number() }).optional() })).optional(),
   },
 }, ({ taskId, jobId, ...input }) => call(async () => {
   if (!input.vectorSvg && !input.layers?.length && !input.artifactPath) throw new Error('必须提供实际矢量内容、完成的图层或真实导出文件。');
@@ -83,4 +96,8 @@ server.registerTool('canvas_web_vector', {
  description:'Codex 在可见网页完成上传和转换后，download 以当前公开 reviewUrl 接收已有 SVG 并创建画布矢量节点，不重新上传或转换。已获得本地 SVG 可用 complete 回传。status 的 verification/blocked 阶段说明验证或下载受阻，保留任务。',
  inputSchema:{...job,action:z.enum(['status','download','complete']),message:z.string().optional(),phase:z.enum(['working','verification','blocked']).optional(),reviewUrl:z.string().optional().describe('从当前可见网页读取的公开 /review/ 结果页完整地址；download 接收已有结果并回传画布，不重新上传或转换。'),baseVersion:z.number().int().optional(),files:z.array(z.object({layerId:z.string(),path:z.string()})).max(300).optional()},
 },({taskId,jobId,...input})=>call(()=>client.mutateJob(taskId,jobId,'web-vector',input)));
-await server.connect(new StdioServerTransport());
+await server.connect(new CodexStdioServerTransport());
+const stopLifecycle = startCanvasLifecycle();
+server.server.onclose = stopLifecycle;
+process.stdin.once('end', stopLifecycle);
+process.once('exit', stopLifecycle);

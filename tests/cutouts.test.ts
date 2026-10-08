@@ -1,3 +1,4 @@
+import { persistedLegacyJob } from './legacy-reconstruction.js';
 import {test,after} from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -5,17 +6,20 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import sharp from 'sharp';
 import {DEFAULT_CUTOUT,cutoutOptionsSchema} from '../shared/cutout.js';
+import {RECONSTRUCTION_POLICY} from '../shared/reconstruction-policy.js';
+import {PHOTOSHOP_REFERENCE_POLICY} from '../shared/photoshop-policy.js';
 
 process.env.LAYER_CANVAS_DATA=path.resolve('test-output/cutouts-'+crypto.randomUUID());
 const {app,TOKEN,BRIDGE_TOKEN}=await import('../server/index.js');
-const {load,getJob}=await import('../server/store.js');
+const {load,getJob,saveJob}=await import('../server/store.js');
 const {readCutoutDefaults}=await import('../server/cutout-settings.js');
+const {cutoutPacket}=await import('../server/cutouts.js');
 app.locals.codexSender=async()=>({delivered:true});
 const server=app.listen(0,'127.0.0.1');await new Promise<void>(r=>server.once('listening',r));
 const base=`http://127.0.0.1:${(server.address() as {port:number}).port}`;
 after(()=>{server.closeAllConnections();server.close()});
 async function api(route:string,body?:any,method=body?'POST':'GET',expected=200){
- const response=await fetch(base+route,{method,headers:{'Content-Type':'application/json','X-Canvas-Token':TOKEN,'X-Canvas-Bridge':BRIDGE_TOKEN},body:body?JSON.stringify(body):undefined});const data:any=await response.json();assert.equal(response.status,expected,JSON.stringify(data));return data;
+ const response=await fetch(base+route,{method,headers:{'Content-Type':'application/json','X-Canvas-Token':TOKEN,'X-Canvas-Bridge':BRIDGE_TOKEN},body:body?JSON.stringify(body):undefined});const data:any=await response.json();assert.equal(response.status,expected,JSON.stringify(data));await persistedLegacyJob(route,data);return data;
 }
 async function fixture(){let d=await api('/api/document?taskId=cutout_'+crypto.randomUUID());const file=path.join(process.env.LAYER_CANVAS_DATA!,crypto.randomUUID()+'.png');await sharp({create:{width:64,height:48,channels:4,background:'#123456'}}).png().toFile(file);d=await api(`/api/document/${d.id}/import-path`,{taskId:d.taskId,path:file});return d;}
 
@@ -29,6 +33,55 @@ test('local settings persist for new canvases, isolate existing canvases, and va
  assert.throws(()=>cutoutOptionsSchema.parse({...options,lucida:{...options.lucida,blackPoint:.8,whitePoint:.2}}));
  await api('/api/cutout-defaults',{psdMode:4,cutoutOptions:{...options,birefnet:{...options.birefnet,resolution:999}}},'PUT',400);
  assert.equal(readCutoutDefaults().psdMode,5);
+});
+
+test('PS cutout packet matches extraction settings without weakening ordinary preview bans or task scope',async()=>{
+ const d=await fixture();
+ const created=await api(`/api/document/${d.id}/jobs`,{type:'photoshop',imageId:d.images[0].id},'POST',202);
+ const j=getJob(created.id);j.reconstructionVersion=3;j.reconstructionWorkflowVersion=4;
+ j.photoshop={...j.photoshop!,allowExtraction:true};saveJob(j);
+ const packet=await api(`/api/jobs/${j.id}/packet?taskId=${d.taskId}`);
+ const ordinaryCutout=cutoutPacket({...j,type:'layer'});
+ assert.deepEqual(Object.keys(packet.cutout),Object.keys(ordinaryCutout));
+ assert.equal(packet.cutout.model,ordinaryCutout.model);
+ assert.deepEqual(packet.cutout.options,ordinaryCutout.options);
+ assert(packet.cutout.referencePolicy.startsWith(PHOTOSHOP_REFERENCE_POLICY));
+ assert.equal(packet.referencePolicy,PHOTOSHOP_REFERENCE_POLICY);
+ for(const text of [packet.cutout.referencePolicy,packet.cutout.policy]){
+  assert.doesNotMatch(text,/最终由 Codex 生成并核验各层|不能从原图再次按颜色抠取|重新抠原图/);
+  assert.match(text,/预览|预抠/);
+  assert.match(text,/allowExtraction=true/);
+  assert.match(text,/冻结.*plan|冻结PS plan/);
+  assert.match(text,/transparent hybrid/);
+  assert.match(text,/registered generated补片/);
+ }
+ assert.equal(packet.generationInputs.previewPixelsAllowed,false);
+ assert.equal(packet.generationInputs.previewMasksAllowed,false);
+ await api(`/api/jobs/${j.id}/packet?taskId=wrong-task`,undefined,'GET',403);
+ j.photoshop.allowExtraction=false;saveJob(j);
+ const disabled=await api(`/api/jobs/${j.id}/packet?taskId=${d.taskId}`);
+ assert.equal(disabled.photoshop.settings.allowExtraction,false);
+ for(const text of [disabled.cutout.referencePolicy,disabled.cutout.policy]){
+  assert.match(text,/allowExtraction=false，禁止提交extracted/);
+  assert.doesNotMatch(text,/额外允许transparent hybrid|allowExtraction=true/);
+ }
+ assert.deepEqual(disabled.executionScope,packet.executionScope);
+ j.photoshop.allowExtraction=true;delete j.reconstructionWorkflowVersion;saveJob(j);
+ const legacy=await api(`/api/jobs/${j.id}/packet?taskId=${d.taskId}`);
+ assert.match(legacy.cutout.policy,/旧流程hybrid仍须generated/);
+ assert.doesNotMatch(legacy.cutout.policy,/额外允许transparent hybrid/);
+ for(const type of ['layer','revise'] as const){
+  const ordinary=await fixture();
+  const job=await api(`/api/document/${ordinary.id}/jobs`,{type,imageId:ordinary.images[0].id},'POST',202);
+  const ordinaryJob=getJob(job.id);ordinaryJob.reconstructionVersion=3;ordinaryJob.reconstructionWorkflowVersion=4;saveJob(ordinaryJob);
+  const normal=await api(`/api/jobs/${job.id}/packet?taskId=${ordinary.taskId}`);
+  assert.equal(normal.cutout.referencePolicy,RECONSTRUCTION_POLICY);
+  assert.match(normal.cutout.policy,/不能从原图再次按颜色抠取像素/);
+  assert.match(normal.cutout.referencePolicy,/最终由 Codex 生成并核验各层/);
+  assert.doesNotMatch(normal.cutout.policy,/hybrid|allowExtraction/);
+  assert.equal(normal.generationInputs.previewPixelsAllowed,false);
+  assert.equal(normal.generationInputs.previewMasksAllowed,false);
+ }
 });
 
 test('coarse and fine flows share annotation-only reconstruction inputs and reject reused preview pixels',async()=>{

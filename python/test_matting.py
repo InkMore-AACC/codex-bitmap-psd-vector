@@ -7,9 +7,33 @@ from unittest.mock import patch
 import numpy as np
 from PIL import Image
 from matting import options_for, adjust_alpha, decontaminate
-from worker import segment
+from worker import segment, remove_background
 
 class MattingTests(unittest.TestCase):
+    def test_standalone_predicts_on_rgba_preserves_rgb_and_full_extent(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            src=np.zeros((16,20,4),np.uint8);src[:,:,:3]=[25,90,210];src[:,:,3]=128;src[0,0,3]=0
+            Image.fromarray(src).save(root/'input.png')
+            mask=np.zeros((16,20),np.float32);mask[3:13,5:15]=.5;mask[3,4]=.01
+            for model in ['birefnet','lucida']:
+                with patch('worker.fine_mask',return_value=(mask,{'device':'cpu','precision':'fp32'})) as predict:
+                    result=remove_background(root/'input.png',root/model,model)
+                predict.assert_called_once()
+                actual=np.asarray(Image.open(result['path']))
+                np.testing.assert_array_equal(actual[:,:,:3],src[:,:,:3])
+                self.assertEqual(actual.shape,src.shape)
+                self.assertEqual(actual[6,6,3],64)
+                self.assertGreater(actual[3,4,3],0)
+                self.assertEqual(actual[0,0,3],0)
+                self.assertEqual(result['options']['padding'],0)
+
+    def test_standalone_empty_result_reports_failure(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);Image.new('RGB',(20,16),'white').save(root/'in.png')
+            with patch('worker.fine_mask',return_value=(np.zeros((16,20),np.float32),{})):
+                with self.assertRaisesRegex(ValueError,'未识别出前景'):
+                    remove_background(root/'in.png',root/'out')
     def test_soft_alpha_unchanged_by_defaults(self):
         alpha=np.array([[0,.001,.1,.3,.8,1]],dtype=np.float32)
         for model in ['coarse','birefnet','lucida']:

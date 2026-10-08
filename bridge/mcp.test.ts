@@ -9,15 +9,20 @@ import { fileURLToPath } from 'node:url';
 
 test('stdio MCP initializes and discovers task-bound canvas tools without starting a model', async () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-  const transport = new StdioClientTransport({ command: process.execPath, args: ['--import', 'tsx', path.join(root, 'bridge', 'mcp.ts')], cwd: root, stderr: 'pipe' });
+  const data = await fs.mkdtemp(path.join(os.tmpdir(), 'canvas-mcp-test-'));
+  const transport = new StdioClientTransport({ command: process.execPath, args: ['--import', 'tsx', path.join(root, 'bridge', 'mcp.ts')], env: { ...process.env, LAYER_CANVAS_DATA: data, LAYER_CANVAS_HOST_TRACKING: '0' }, cwd: root, stderr: 'pipe' });
   const client = new Client({ name: 'layer-canvas-test', version: '1.0.0' });
   try {
     await client.connect(transport);
     const listing = await client.listTools();
-    assert.equal(listing.tools.length, 12);
+    assert.equal(listing.tools.length, 14);
+    assert(listing.tools.some(tool=>tool.name==='canvas_ps_rebuild'));
     for (const tool of listing.tools) assert(tool.inputSchema.required?.includes('taskId'));
     assert(listing.tools.some(tool => tool.name === 'canvas_apply_plan'));
     assert(listing.tools.some(tool => tool.name === 'canvas_web_vector'));
+    const complete = listing.tools.find(tool => tool.name === 'canvas_complete_request')!;
+    assert((complete.inputSchema.properties?.layers as any)?.items?.properties?.review,
+      'MCP must expose structured visual review, not silently strip it');
     const result = await client.callTool({ name: 'canvas_complete_request', arguments: { taskId: 'task_current', jobId: 'empty_job', baseVersion: 1 } });
     assert.equal(result.isError, true);
     assert.match(JSON.stringify(result), /必须提供实际/);
@@ -28,10 +33,11 @@ test('configured plugin MCP starts outside the workspace with Windows-safe ESM i
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const config = JSON.parse(await fs.readFile(path.join(root, 'plugins/layer-canvas/.mcp.json'), 'utf8')).mcpServers.layer_canvas;
   assert.match(config.args[1], /^file:\/\//);
-  const transport = new StdioClientTransport({ ...config, env: { ...process.env, ...config.env }, cwd: os.tmpdir(), stderr: 'pipe' });
+  const data = await fs.mkdtemp(path.join(os.tmpdir(), 'canvas-installed-test-'));
+  const transport = new StdioClientTransport({ ...config, env: { ...process.env, ...config.env, LAYER_CANVAS_DATA: data, LAYER_CANVAS_HOST_TRACKING: '0' }, cwd: os.tmpdir(), stderr: 'pipe' });
   const client = new Client({ name: 'installed-configuration-test', version: '1.0.0' });
   try {
     await client.connect(transport);
-    assert.equal((await client.listTools()).tools.length, 12);
+    assert.equal((await client.listTools()).tools.length, 14);
   } finally { await client.close(); }
 });

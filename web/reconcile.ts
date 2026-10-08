@@ -1,5 +1,22 @@
 // Preserve edits made while a save is in flight, while accepting the server's
 // updated layer previews, versions and other fields that the user did not edit.
+import type { Document } from '../shared/canvas';
+
+/** Undo changes logical visibility/order, never resurrects stale server-owned PSD pointers. */
+export function retainNativeAssets(document: Document, latest: Document | null) {
+  if (!latest) return document;
+  for (const image of document.images) {
+    const saved = latest.images.find((i) => i.id === image.id);
+    if (image.nativePsd && saved?.nativePsd) {
+      image.nativePsd = structuredClone(saved.nativePsd);
+      image.psdSource = saved.psdSource;
+      image.artifactUrl = saved.artifactUrl;
+      image.url = saved.url;
+      image.source = saved.source;
+    }
+  }
+  return document;
+}
 export function reconcileSaved<T>(base: T, current: T, saved: T): T {
   if (JSON.stringify(base) === JSON.stringify(current)) return structuredClone(saved);
   if (Array.isArray(base) && Array.isArray(current) && Array.isArray(saved)) {

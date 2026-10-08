@@ -26,6 +26,8 @@ try {
     }
     case 'canvas_web_vector': { const {taskId,jobId,...payload}=args;result=await client.mutateJob(taskId,jobId,'web-vector',payload);break; }
     case 'canvas_adobe': { const {taskId,jobId,...payload}=args;result=await client.mutateJob(taskId,jobId,'adobe',payload);break; }
+    case 'canvas_ps_rebuild': result=await client.mutateJob(args.taskId,args.jobId,'ps-rebuild',args.input);break;
+    case 'canvas_generation': result=await client.mutateJob(args.taskId,args.jobId,'generation',args.input);break;
     case 'canvas_prepare_cutouts': {
       const {taskId,jobId,...payload}=args;
       result=await client.mutateJob(taskId,jobId,'cutouts',payload); break;

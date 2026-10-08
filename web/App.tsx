@@ -16,15 +16,18 @@ import {
   useState,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
-import { api, ApiError, download } from './api';
+import { api, apiWhenReady, ApiError, download } from './api';
 import TextProperties from './TextProperties';
 import ModelStatus from './ModelStatus';
-import { mergeConcurrent, reconcileSaved } from './reconcile';
+import { mergeConcurrent, reconcileSaved, retainNativeAssets } from './reconcile';
 import { connectionPath, imagePoint, labelPoint } from './canvasGeometry';
 import { engines } from './vectorProviders';
 
 import AdobeSettings from './AdobeSettings';
+import PhotoshopSettings from './PhotoshopSettings';
 import PsdSettings from './PsdSettings';
+import MattingSettings from './MattingSettings';
+import UpscaleSettings from './UpscaleSettings';
 import { PSD_MODES as modes, type PsdMode, type CutoutOptions } from '../shared/cutout';
 import AnnotationStyle, { defaultStyle, type MarkStyle } from './AnnotationStyle';
 import type { Annotation, CanvasDocument, CanvasImage, Job, ServiceSettings } from './types';
@@ -33,8 +36,17 @@ const clone = <T,>(value: T): T => structuredClone(value);
 const uid = () => crypto.randomUUID();
 const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
 
-const statusText = { original: '原图', preview: '预分层', layered: '已分层', vector: '矢量' };
+const statusText = {
+  original: '原图',
+  preview: '预分层',
+  layered: '已分层',
+  vector: '矢量',
+  cutout: '已抠图',
+  upscaled: '已超分',
+};
 const jobNames: Record<Job['type'], string> = {
+  cutout: '精细抠图',
+  upscale: '本地超分',
   plan: '预分层',
   layer: '确认分层',
   revise: '修改',
@@ -100,6 +112,7 @@ export default function App() {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
+  const [videoPreviewId, setVideoPreviewId] = useState<string | null>(null);
   const [saveState, setSaveState] = useState('已保存');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const selectedId = selectedIds.length === 1 ? selectedIds[0] : null;
@@ -173,7 +186,7 @@ export default function App() {
   useEffect(() => {
     setShowOriginal(false);
     setOriginal(null);
-    if (!doc?.id || !selectedId) return;
+    if (!doc?.id || !selectedId || image?.mediaType === 'video') return;
     let active = true;
     api<{ url: string; complete: boolean }>(
       `/api/document/${doc.id}/images/${selectedId}/reference`,
@@ -249,7 +262,7 @@ export default function App() {
       return;
     }
     if (!pending.current || !docRef.current) return;
-    let snapshot = clone(docRef.current);
+    let snapshot = retainNativeAssets(clone(docRef.current),serverBase.current);
     const originalSnapshot = clone(snapshot);
     const serial = editSerial.current;
     const work = (async () => {
@@ -309,7 +322,11 @@ export default function App() {
       return;
     }
     setViewHydrated(false);
-    api<CanvasDocument>(`/api/document?taskId=${encodeURIComponent(taskId)}`)
+    const connection = new AbortController();
+    apiWhenReady<CanvasDocument>(
+      `/api/document?taskId=${encodeURIComponent(taskId)}`,
+      connection.signal,
+    )
       .then(async (d) => {
         serverBase.current = clone(d);
         accept(d);
@@ -335,16 +352,18 @@ export default function App() {
           );
         setNotice(d.images.length ? `已恢复 ${d.images.length} 个节点` : '已打开当前对话画布');
       })
-      .catch((e) =>
+      .catch((e) => {
+        if (connection.signal.aborted) return;
         setLoadError(
           e instanceof ApiError && e.status === 401
             ? '画布访问凭证已失效。请回到当前 Codex 对话说“打开分层画布”以重新连接，历史不会丢失。'
             : String(e),
-        ),
-      );
-    api<ServiceSettings>('/api/settings')
+        );
+      });
+    apiWhenReady<ServiceSettings>('/api/settings', connection.signal)
       .then(setSettings)
       .catch(() => {});
+    return () => connection.abort();
   }, [taskId, accept]);
   useEffect(() => {
     if (!doc?.id || !viewHydrated) return;
@@ -471,6 +490,10 @@ export default function App() {
   };
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
+      if (videoPreviewId) {
+        if (e.key === 'Escape') setVideoPreviewId(null);
+        return;
+      }
       setSelectionModifier(e.shiftKey || e.ctrlKey || e.metaKey);
       const tag = (e.target as HTMLElement).tagName;
       if (['INPUT', 'TEXTAREA', 'SELECT'].includes(tag)) return;
@@ -590,14 +613,19 @@ export default function App() {
     setError('');
     try {
       await flush();
-      const form = new FormData();
-      Array.from(files).forEach((file) => form.append('files', file));
-      const d = await api<CanvasDocument>(`/api/document/${docRef.current.id}/import`, {
-        method: 'POST',
-        body: form,
-      });
-      serverBase.current = clone(d);
-      accept(d);
+      let d = docRef.current!;
+      for (const file of Array.from(files)) {
+        const form = new FormData();
+        form.append('files', file);
+        const isVideo = /\.(mp4|mov|mkv|webm|avi)$/i.test(file.name);
+        setNotice(isVideo ? `正在检查视频并生成预览：${file.name}` : `正在导入：${file.name}`);
+        d = await api<CanvasDocument>(
+          `/api/document/${d.id}/${isVideo ? 'import-video' : 'import'}`,
+          { method: 'POST', body: form },
+        );
+        serverBase.current = clone(d);
+        accept(d);
+      }
       pending.current = false;
       chooseImage(d.images.at(-1)?.id || '');
       undoStack.current = [];
@@ -615,6 +643,7 @@ export default function App() {
   };
   const queue = async (type: Job['type']) => {
     if (!image || !docRef.current) return;
+    if (image.mediaType === 'video' && type !== 'upscale') return;
     setBusy(true);
     setError('');
     try {
@@ -623,10 +652,13 @@ export default function App() {
         method: 'POST',
         body: JSON.stringify({
           imageId: image.id,
-          ...(layerId && !['plan', 'layer', 'photoshop', 'illustrator'].includes(type)
+          ...(layerId &&
+          !['cutout', 'upscale', 'plan', 'layer', 'photoshop', 'illustrator'].includes(type)
             ? { layerIds: [layerId] }
             : {}),
-          ...(viewMode === 'vector' ? { useVectorLayers: true } : {}),
+          ...(viewMode === 'vector' && !['cutout', 'upscale'].includes(type)
+            ? { useVectorLayers: true }
+            : {}),
           type,
           mode: docRef.current.settings.psdMode,
           engine: docRef.current.settings.vectorEngine,
@@ -648,6 +680,13 @@ export default function App() {
     setError('');
     try {
       await flush();
+      if (format === 'video-original') {
+        await download(
+          image.source,
+          `${image.name.replace(/\.[^.]+$/, '')}.${image.source.split('.').at(-1)}`,
+        );
+        return;
+      }
       if (format === 'ai-artifact' && image.artifactUrl) {
         await download(image.artifactUrl, `${image.name.replace(/\.[^.]+$/, '')}.ai`);
         return;
@@ -844,6 +883,11 @@ export default function App() {
       beginMove(e, img);
       return;
     }
+    if (img.mediaType === 'video') {
+      chooseImage(img.id);
+      setTool('select');
+      return;
+    }
     if (showOriginal && selectedId === img.id) {
       setNotice('请关闭显示原图后，在当前结果上标注');
       return;
@@ -1022,7 +1066,7 @@ export default function App() {
         hidden
         ref={fileRef}
         type="file"
-        accept=".png,.jpg,.jpeg,.webp,.psd,.svg"
+        accept=".png,.jpg,.jpeg,.webp,.psd,.svg,.mp4,.mov,.mkv,.webm,.avi"
         multiple
         onChange={(e) => e.target.files && void importFiles(e.target.files)}
       />
@@ -1046,7 +1090,42 @@ export default function App() {
           删除{selectedIds.length > 1 ? ` (${selectedIds.length})` : ''}
         </button>
         <div className="split-action">
-          <button onClick={() => queue('plan')} disabled={!image || busy}>
+          <button
+            onClick={() => queue('cutout')}
+            disabled={!image || image.mediaType === 'video' || busy}
+            title="独立精细抠图 · 本地运行，不消耗 Codex 额度；预分层节点使用其干净输入"
+          >
+            抠图
+          </button>
+          <button
+            aria-label="独立抠图设置"
+            title="选择精细模型与效果参数"
+            onClick={() => openSettings('matting')}
+          >
+            ⌄
+          </button>
+        </div>
+        <div className="split-action">
+          <button
+            onClick={() => queue('upscale')}
+            disabled={!image || busy}
+            title="本地 SeedVR2 超分 · 图片/PSD保留分层，视频连续帧处理并保留音轨 · 生成新节点 · 不消耗 Codex 额度"
+          >
+            超分
+          </button>
+          <button
+            aria-label="超分设置"
+            title="放大倍率、颜色保持与显存设置"
+            onClick={() => openSettings('upscale')}
+          >
+            ⌄
+          </button>
+        </div>
+        <div className="split-action">
+          <button
+            onClick={() => queue('plan')}
+            disabled={!image || image.mediaType === 'video' || busy}
+          >
             ▧ 预分层
           </button>
           <button
@@ -1058,7 +1137,10 @@ export default function App() {
           </button>
         </div>
         <div className="split-action">
-          <button onClick={() => queue('vectorize')} disabled={!image || busy}>
+          <button
+            onClick={() => queue('vectorize')}
+            disabled={!image || image.mediaType === 'video' || busy}
+          >
             ◇ 矢量化
           </button>
           <button
@@ -1081,9 +1163,19 @@ export default function App() {
           <option value="" disabled>
             导出 ⌄
           </option>
-          <option value="psd">位图分层 PSD</option>
-          <option value="svg">纯矢量 SVG</option>
-          <option value="png">合成 PNG</option>
+          {image?.mediaType === 'video' ? (
+            image.artifactUrl ? (
+              <option value="mp4">超分视频 MP4</option>
+            ) : (
+              <option value="video-original">原视频文件</option>
+            )
+          ) : (
+            <>
+              <option value="psd">{image?.nativePsd ? '原生分层 PSD' : image?.layers.some(l => l.kind === 'vector') ? '分层 PSD（矢量层转像素）' : '位图分层 PSD'}</option>
+              <option value="svg">纯矢量 SVG</option>
+              <option value="png">合成 PNG</option>
+            </>
+          )}
           {image?.artifactUrl?.toLowerCase().endsWith('.ai') && (
             <option value="ai-artifact">Illustrator AI 文件</option>
           )}
@@ -1223,6 +1315,7 @@ export default function App() {
                 className={tool === id ? 'active' : ''}
                 title={id === 'select' ? '选择 V · 空白处拖框选图 · Shift / Ctrl 多选' : label}
                 aria-label={label}
+                disabled={image?.mediaType === 'video' && id !== 'select' && id !== 'hand'}
                 onClick={() => setTool(id)}
               >
                 <ToolIcon tool={id} />
@@ -1328,13 +1421,32 @@ export default function App() {
                   }}
                 >
                   <span>{img.name}</span>
+                  {img.video && (
+                    <button
+                      className="video-play"
+                      aria-label={`播放 ${img.name}`}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onDoubleClick={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setVideoPreviewId(img.id);
+                      }}
+                    >
+                      ▶ 播放 · {Math.floor(img.video.duration / 60)}:
+                      {String(Math.floor(img.video.duration % 60)).padStart(2, '0')}
+                    </button>
+                  )}
                   <small>
                     {statusText[img.status]}
                     {img.basedOnOlderVersion ? ' · 基于旧版' : ''}
                   </small>
                 </div>
                 <div className="image-content checker">
-                  {showOriginal && selectedId === img.id && original?.imageId === img.id ? (
+                  <div className="layer-composite">
+                  {img.mediaType !== 'video' &&
+                  showOriginal &&
+                  selectedId === img.id &&
+                  original?.imageId === img.id ? (
                     <img
                       className="original-comparison"
                       draggable={false}
@@ -1342,6 +1454,8 @@ export default function App() {
                       alt="原图对比"
                       style={{ width: img.width, height: img.height, objectFit: 'contain' }}
                     />
+                  ) : img.nativePsd ? (
+                    <img draggable={false} src={img.nativePsd.compositeUrl} alt={`${img.name} · PS实际合成`} />
                   ) : img.status === 'vector' && img.vectorUrl && !img.vectorLayers?.length ? (
                     <img draggable={false} src={img.vectorUrl} alt={img.name} />
                   ) : img.status === 'preview' && img.layers.some((l) => l.kind === 'plan') ? (
@@ -1366,6 +1480,7 @@ export default function App() {
                               width: l.previewUrl ? img.width : l.width,
                               height: l.previewUrl ? img.height : l.height,
                               opacity: l.opacity,
+                            mixBlendMode: l.blendMode || 'normal',
                             }}
                           />
                         ))}
@@ -1387,10 +1502,12 @@ export default function App() {
                             width: l.previewUrl ? img.width : l.width,
                             height: l.previewUrl ? img.height : l.height,
                             opacity: l.opacity,
+                            mixBlendMode: l.blendMode || 'normal',
                           }}
                         />
                       ))
                   )}
+                  </div>
                 </div>
                 {!showOriginal &&
                   !marquee &&
@@ -1437,31 +1554,6 @@ export default function App() {
                       onDrag={(e, handle) => beginFrame(e, img, handle)}
                     />
                   )}
-                {selectedId === img.id &&
-                  !showOriginal &&
-                  !marquee &&
-                  !(selectionModifier && tool === 'select') &&
-                  img.layers
-                    .filter((l) => l.kind === 'plan' && l.visible && l.id !== layerId)
-                    .map((l) => (
-                      <LayerFrame
-                        key={l.id}
-                        frame={layerFrame(l, img)}
-                        name={l.name}
-                        scale={view.scale}
-                        editable={false}
-                        onDrag={() => {}}
-                        onSelect={
-                          tool === 'select'
-                            ? (e) => {
-                                e.stopPropagation();
-                                setLayerId(l.id);
-                                setSelectedMarkId(null);
-                              }
-                            : undefined
-                        }
-                      />
-                    ))}
                 {selectedId === img.id && (
                   <span
                     className="board-dimensions"
@@ -1497,7 +1589,9 @@ export default function App() {
                 role="switch"
                 aria-checked={showOriginal}
                 className={showOriginal ? 'active' : ''}
-                disabled={!image || !original?.url || !original.complete}
+                disabled={
+                  !image || image.mediaType === 'video' || !original?.url || !original.complete
+                }
                 title="只对比当前节点与最初原图，不改变任务输入或导出内容"
                 onClick={() => setShowOriginal((v) => !v)}
               >
@@ -1648,7 +1742,9 @@ export default function App() {
                       {l.name}
                     </span>
                     <small>
-                      {l.kind === 'plan'
+                      {image?.nativePsd
+                        ? ({'native-text':'PS原生文字','native-shape':'PS原生形状',mixed:'PS混合结构',pixels:'PS位图'}[image.nativePsd.mappings.find(m=>m.layerId===l.id)?.editable||'pixels'])
+                        : l.kind === 'plan'
                         ? '规划框'
                         : l.preview
                           ? '预览'
@@ -1658,6 +1754,9 @@ export default function App() {
                               ? '矢量'
                               : '位图'}
                       {l.opinion ? ' · 有意见' : ''}
+                      {l.review?.status === 'needs-revision' && (
+                        <span style={{ color: '#ff3b30' }}> · 自动检查待修改</span>
+                      )}
                     </small>
                   </div>
                   <button
@@ -1738,9 +1837,11 @@ export default function App() {
               <span>{selectedLayer?.name || image?.name || '未选择图片'}</span>
             </div>
             <p className="field-hint">
-              {selectedLayer
-                ? '仅显示这个图层的修改意见，画布中对应标注已突出。'
-                : '只显示整张图片的修改意见。点击图层，查看该层意见。'}
+              {image?.mediaType === 'video'
+                ? '视频使用顶部超分按钮和超分设置；此处不提交图片修改意见。'
+                : selectedLayer
+                  ? '仅显示这个图层的修改意见，画布中对应标注已突出。'
+                  : '只显示整张图片的修改意见。点击图层，查看该层意见。'}
             </p>
             {image?.status === 'preview' && selectedLayer && (
               <div className="frame-controls">
@@ -1802,7 +1903,7 @@ export default function App() {
             <textarea
               aria-label={selectedLayer ? '图层修改意见' : '总图修改意见'}
               className="opinion-editor"
-              disabled={!image}
+              disabled={!image || image.mediaType === 'video'}
               style={{ height: doc.layout.editorHeight || 260 }}
               value={selectedLayer?.opinion ?? image?.opinion ?? ''}
               placeholder={
@@ -1826,8 +1927,12 @@ export default function App() {
             </div>
             <div className="opinion-actions">
               <span className="muted">自动保存 · {selectedLayer ? '仅此图层' : '总图'}</span>
-              <button className="primary" disabled={!image || busy} onClick={() => queue('revise')}>
-                提交修改 ↗
+              <button
+                className="primary"
+                disabled={!image || image.mediaType === 'video' || busy}
+                onClick={() => queue('revise')}
+              >
+                {image?.nativePsd?'提交 PS 修改 ↗':'提交修改 ↗'}
               </button>
             </div>
             {image && (
@@ -1947,7 +2052,7 @@ export default function App() {
           <div className="handoff">
             <button
               className="handoff-button"
-              disabled={!image || busy}
+              disabled={!image || image.mediaType === 'video' || busy}
               onClick={() => queue('photoshop')}
             >
               <span className="adobe ps">Ps</span>交接 PS
@@ -1955,7 +2060,7 @@ export default function App() {
             </button>
             <button
               className="handoff-button"
-              disabled={!image || busy}
+              disabled={!image || image.mediaType === 'video' || busy}
               onClick={() => queue('illustrator')}
             >
               <span className="adobe ai">Ai</span>交接 AI
@@ -2062,6 +2167,8 @@ export default function App() {
             </div>
             <nav className="settings-tabs">
               {[
+                ['matting', '独立抠图'],
+                ['upscale', '图片 / 视频超分'],
                 ['psd', 'PSD 分层'],
                 ['vector', '矢量化'],
                 ['api', 'API 凭证'],
@@ -2078,6 +2185,54 @@ export default function App() {
               ))}
             </nav>
             <div className="settings-body">
+              {settingsTab === 'upscale' && (
+                <UpscaleSettings
+                  value={doc.settings.upscale}
+                  image={image}
+                  onSave={async (value) => {
+                    if (busy) throw new Error('请等待当前保存完成');
+                    change((d) => {
+                      d.settings.upscale = clone(value);
+                    });
+                    setBusy(true);
+                    try {
+                      await flush();
+                      await api('/api/upscale-defaults', {
+                        method: 'PUT',
+                        body: JSON.stringify(value),
+                      });
+                      setNotice('超分设置已保存为默认');
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                />
+              )}
+              {settingsTab === 'matting' && (
+                <>
+                  <MattingSettings
+                    value={doc.settings.matting}
+                    onSave={async (value) => {
+                      if (busy) throw new Error('请等待当前保存完成');
+                      change((d) => {
+                        d.settings.matting = clone(value);
+                      });
+                      setBusy(true);
+                      try {
+                        await flush();
+                        await api('/api/matting-defaults', {
+                          method: 'PUT',
+                          body: JSON.stringify(value),
+                        });
+                        setNotice('独立抠图设置已保存为默认');
+                      } finally {
+                        setBusy(false);
+                      }
+                    }}
+                  />
+                  <ModelStatus models={settings?.models} />
+                </>
+              )}
               {settingsTab === 'psd' && (
                 <>
                   <PsdSettings
@@ -2290,7 +2445,10 @@ export default function App() {
                   <ModelStatus models={settings?.models} />
                 </form>
               )}
-              {settingsTab === 'adobe' && <AdobeSettings />}
+              {settingsTab === 'adobe' && <><AdobeSettings /><PhotoshopSettings value={doc.settings.photoshop} onSave={async(value)=>{
+                change(d=>{d.settings.photoshop=value;});await flush();
+                await api('/api/photoshop-defaults',{method:'PUT',body:JSON.stringify(value)});
+              }}/></>}
               {settingsTab === 'display' && (
                 <>
                   <p className="settings-intro">
@@ -2330,7 +2488,7 @@ export default function App() {
             </div>
             <div className="settings-footer">
               <span>
-                {['api', 'adobe', 'psd'].includes(settingsTab)
+                {['api', 'adobe', 'psd', 'matting', 'upscale'].includes(settingsTab)
                   ? '此页设置需点击保存'
                   : '设置自动保存'}
               </span>
@@ -2341,6 +2499,35 @@ export default function App() {
           </section>
         </div>
       )}
+      {videoPreviewId &&
+        (() => {
+          const item = doc.images.find((i) => i.id === videoPreviewId);
+          return item?.video ? (
+            <div className="modal-backdrop video-modal" onClick={() => setVideoPreviewId(null)}>
+              <section role="dialog" aria-label="视频预览" onClick={(e) => e.stopPropagation()}>
+                <header>
+                  <b>{item.name}</b>
+                  <button aria-label="关闭视频预览" onClick={() => setVideoPreviewId(null)}>
+                    ×
+                  </button>
+                </header>
+                <video
+                  controls
+                  autoPlay
+                  playsInline
+                  src={item.video.previewUrl}
+                  poster={item.url}
+                />
+                <small>
+                  {item.width} × {item.height} · {item.video.frameCount} 帧 ·{' '}
+                  {(item.video.fpsNumerator / item.video.fpsDenominator).toFixed(2)} fps ·{' '}
+                  {item.video.audioStreams ? '含音轨' : '无音轨'}
+                  {!item.artifactUrl ? ' · 此为轻量预览，超分读取原视频' : ''}
+                </small>
+              </section>
+            </div>
+          ) : null;
+        })()}
     </div>
   );
 }

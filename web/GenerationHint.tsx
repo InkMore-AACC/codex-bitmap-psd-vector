@@ -6,7 +6,7 @@ export function GenerationHint({ frame }: { frame: LayerFrame }) {
     <small className="generation-hint" role="note">
       {plan.exceedsBudget && (
         <span className="generation-warning">
-          画幅超过155万像素：生成时将等比例缩小，完成后放大回原画幅，清晰度可能降低。
+          画幅超过150万像素：生成时将等比例缩小，完成后放大回原画幅，清晰度可能降低。
           <br />
         </span>
       )}

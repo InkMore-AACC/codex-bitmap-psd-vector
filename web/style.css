@@ -305,7 +305,12 @@ select option {
   position: relative;
   overflow: hidden;
 }
-.image-content > img {
+.layer-composite {
+  position: absolute;
+  inset: 0;
+  isolation: isolate;
+}
+.layer-composite > img {
   position: absolute;
   left: 0;
   top: 0;
@@ -2065,3 +2070,45 @@ select option {
   color: var(--muted);
   line-height: 1.6;
 }
+
+.video-play {
+  font-size: 10px;
+  padding: 2px 5px;
+  white-space: nowrap;
+}
+.video-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000b;
+}
+.video-modal section {
+  width: min(1000px, 90vw);
+  padding: 14px;
+  background: var(--panel, #202124);
+  border-radius: 10px;
+}
+.video-modal header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.video-modal video {
+  display: block;
+  width: 100%;
+  max-height: 75vh;
+  background: #000;
+}
+.video-modal small {
+  display: block;
+  margin-top: 8px;
+}
+.ps-rebuild-settings {display:flex;flex-direction:column;gap:12px;margin-top:24px;padding-top:16px;border-top:1px solid var(--border);font-size:12px}
+.ps-rebuild-settings label {display:flex;align-items:center;gap:8px}
+.ps-rebuild-settings small {opacity:.7;line-height:1.6}
+.ps-rebuild-settings select {background:var(--raised);color:var(--text);border:1px solid var(--border);border-radius:5px;padding:5px 8px}
+.ps-rebuild-settings button {align-self:flex-start;background:var(--accent);color:var(--bg);padding:8px 12px}

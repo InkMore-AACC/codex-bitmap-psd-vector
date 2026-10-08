@@ -1,3 +1,4 @@
+import { persistedLegacyJob } from './legacy-reconstruction.js';
 import {test,after} from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -10,7 +11,7 @@ const {app,TOKEN,BRIDGE_TOKEN,adobe}=await import('../server/index.js');
 const server=app.listen(0,'127.0.0.1');await new Promise<void>(r=>server.once('listening',r));
 const address=server.address() as {port:number};const base=`http://127.0.0.1:${address.port}`;
 after(async()=>{await adobe.close();server.closeAllConnections();server.close()});
-async function api(route:string,body?:any,method=body?'POST':'GET',internal=false){const response=await fetch(base+route,{method,headers:{'X-Canvas-Token':TOKEN,...internal?{'X-Canvas-Bridge':BRIDGE_TOKEN}:{},...body?{'Content-Type':'application/json'}:{}},body:body?JSON.stringify(body):undefined});const result:any=await response.json();assert.equal(response.status<400,true,JSON.stringify(result));return result;}
+async function api(route:string,body?:any,method=body?'POST':'GET',internal=false){const response=await fetch(base+route,{method,headers:{'X-Canvas-Token':TOKEN,...internal?{'X-Canvas-Bridge':BRIDGE_TOKEN}:{},...body?{'Content-Type':'application/json'}:{}},body:body?JSON.stringify(body):undefined});const result:any=await response.json();assert.equal(response.status<400,true,JSON.stringify(result));await persistedLegacyJob(route,result);return result;}
 async function fixture(){let d=await api('/api/document?taskId=canvas_update_'+crypto.randomUUID());const file=path.join(process.env.LAYER_CANVAS_DATA!,crypto.randomUUID()+'.png');await sharp({create:{width:100,height:80,channels:4,background:'#aa6677'}}).png().toFile(file);d=await api(`/api/document/${d.id}/import-path`,{taskId:d.taskId,path:file},'POST',true);return {d,file}}
 
 test('node deletion persists, cancels only its jobs, supports undo and isolates descendant processing',async()=>{
@@ -66,6 +67,46 @@ test('formal outputs branch from frozen source and preserve newer edits and anno
  const node=done.document.images.find((i:any)=>i.id===done.job.result.imageId);
  assert.notEqual(node.id,im.id);assert.equal(node.parentId,im.id);assert.equal(node.basedOnOlderVersion,true);assert.equal(node.opinion,'');assert.equal(done.document.images[0].opinion,'任务提交后新增');assert(node.x>=700);assert.deepEqual(node.annotations[0].points,[-25,15]);assert.notEqual(node.annotations[0].id,'label');
  const repeat=await fetch(base+`/api/jobs/${j.id}/apply`,{method:'POST',headers:{'X-Canvas-Token':TOKEN,'X-Canvas-Bridge':BRIDGE_TOKEN,'Content-Type':'application/json'},body:JSON.stringify({taskId:d.taskId,baseVersion:j.version,layers:[]})});assert.equal(repeat.status,409);
+});
+
+test('historical signed placement offsets survive saving another preview and do not block reconstruction submission',async()=>{
+ let {d,file}=await fixture();
+ const original=structuredClone(d.images[0]);
+ const j=await api(`/api/document/${d.id}/jobs`,{imageId:original.id,type:'layer'});
+ const done=await api(`/api/jobs/${j.id}/apply`,{taskId:d.taskId,baseVersion:j.version,layers:[{id:'historical',name:'历史定位层',path:file,width:100,height:80}]},'POST',true);
+ d=done.document;
+ const {dir}=await import('../server/store.js');
+ const {planningLayer}=await import('../shared/planning.js');
+ const {documentSchema}=await import('../server/validation.js');
+ const historical=d.images.at(-1);
+ historical.layers[0].generationAdaptation={scale:.23792697290930506,offsetX:-16,offsetY:-24.125,contentWidth:100,contentHeight:80,aspectError:0,padding:'transparent'};
+ const historicalSnapshot=structuredClone(historical);
+ // Existing result metadata may have been persisted by result submission before
+ // a later browser edit validates the entire document.
+ fs.writeFileSync(path.join(dir(d.id),'document.json'),JSON.stringify(d));
+ d=await api(`/api/document?taskId=${d.taskId}`);
+ assert.deepEqual(d.images.at(-1),historicalSnapshot);
+ d.images[0].status='preview';d.images[0].layers=[planningLayer('planned','新预分层框',{x:10,y:12,width:20,height:30})];
+ d.images[0].opinion='只重建当前预分层图片';
+ const plannedSnapshot=structuredClone(d.images[0]);
+ d=await api(`/api/document/${d.id}`,{document:d,expectedRevision:d.revision},'PUT');
+ assert.deepEqual(d.images.at(-1),historicalSnapshot);
+ assert.deepEqual(d.images[0].layers,plannedSnapshot.layers);
+ assert.equal(d.images[0].source,original.source);
+ const submitted=await api(`/api/document/${d.id}/jobs`,{imageId:d.images[0].id,type:'layer',mode:3});
+ const packet=await api(`/api/jobs/${submitted.id}/packet?taskId=${d.taskId}`,undefined,'GET',true);
+ assert.equal(packet.image.id,d.images[0].id);assert.equal(packet.globalOpinion,plannedSnapshot.opinion);
+ assert.deepEqual(packet.frameContract.layers[0].frame,plannedSnapshot.layers[0].frame);
+ assert.deepEqual((await api(`/api/document?taskId=${d.taskId}`)).images.at(-1),historicalSnapshot);
+ // Allow signed finite coordinates only; malformed numbers and invalid sizes
+ // must still be refused without changing the persisted canvas.
+ const before=fs.readFileSync(path.join(dir(d.id),'document.json'));
+ for(const [key,value] of [['offsetX',null],['offsetY',Infinity],['scale',0],['contentWidth',0]] as const){
+  const bad=structuredClone(d);bad.images.at(-1).layers[0].generationAdaptation[key]=value;
+  assert.equal(documentSchema.safeParse(bad).success,false);
+  const response=await fetch(base+`/api/document/${d.id}`,{method:'PUT',headers:{'Content-Type':'application/json','X-Canvas-Token':TOKEN},body:JSON.stringify({document:bad,expectedRevision:d.revision})});
+  assert.equal(response.status,400);assert.deepEqual(fs.readFileSync(path.join(dir(d.id),'document.json')),before);
+ }
 });
 
 test('moving image and toggling preview visibility do not advance content version',async()=>{

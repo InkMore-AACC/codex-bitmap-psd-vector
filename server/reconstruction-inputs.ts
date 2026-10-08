@@ -42,7 +42,7 @@ export function reconstructionInputs(documentId: string, image: CanvasImage, ori
       ? { url: image.source, vectorUrl: undefined, artifactUrl: undefined }
       : {}),
   };
-  const currentPath = assetPath(documentId, image.source);
+  const currentPath = assetPath(documentId, image.status==='preview'?image.source:image.url||image.source);
   const actualLayers = [...image.layers, ...(image.vectorLayers || [])].filter(
     (l): l is ImageLayer => l.kind !== 'plan' && !isPreviewLayer(image, l),
   );

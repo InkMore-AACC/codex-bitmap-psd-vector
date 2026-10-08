@@ -40,8 +40,8 @@ export async function layerFromFile(docId: string, value: any, image: CanvasImag
       height ??= m.height;
       url = writeAsset(
         docId,
-        m.format === 'png' ? source : await sharp(source).png().toBuffer(),
-        '.png',
+        m.format === 'png' || value.generationId ? source : await sharp(source).png().toBuffer(),
+        value.generationId && m.format === 'jpeg' ? '.jpg' : '.png',
       );
     }
   } else if (value.url) {
@@ -59,12 +59,15 @@ export async function layerFromFile(docId: string, value: any, image: CanvasImag
     height,
     visible: value.visible ?? true,
     opacity: value.opacity ?? 1,
+    blendMode: value.blendMode,
     opinion: value.opinion || '',
     disposition: value.disposition || 'keep',
+    review: value.review,
     kind,
     preview: value.preview || false,
     cutoutBox: value.cutoutBox,
     sourceCrop: value.sourceCrop,
+    generationId: value.generationId,
     frame: value.frame,
     sourceLayerIds: value.sourceLayerIds,
     text: value.text,

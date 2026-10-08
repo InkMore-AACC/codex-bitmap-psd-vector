@@ -1,0 +1,32 @@
+{
+  "source": {
+    "revision": "b65d1ffaca35fcda5889e120dcd0c8520553c7b2",
+    "url": "https://codeload.github.com/Comfy-Org/ComfyUI/zip/b65d1ffaca35fcda5889e120dcd0c8520553c7b2",
+    "sha256": "085b8118e5af70d10d9cde74f6c4b048e1b8ff31afaca0a0c4023bb44a117b57"
+  },
+  "weightsRevision": "df48879708206a403d2a61acd55578c2e80fd233",
+  "files": [
+    {
+      "path": "models/seedvr2/seedvr2_7b_int8_convrot.safetensors",
+      "size": 8334897976,
+      "algorithm": "sha256",
+      "hash": "5aa0d25fc9d35e449b659d0c9a5dcb22e2a4fa04032101b95a39da42b32c1be6",
+      "urls": [
+        "https://modelscope.cn/models/Comfy-Org/SeedVR2/resolve/master/diffusion_models/seedvr2_7b_int8_convrot.safetensors",
+        "https://hf-mirror.com/Comfy-Org/SeedVR2/resolve/df48879708206a403d2a61acd55578c2e80fd233/diffusion_models/seedvr2_7b_int8_convrot.safetensors",
+        "https://huggingface.co/Comfy-Org/SeedVR2/resolve/df48879708206a403d2a61acd55578c2e80fd233/diffusion_models/seedvr2_7b_int8_convrot.safetensors"
+      ]
+    },
+    {
+      "path": "models/seedvr2/seedvr2_ema_vae_fp16.safetensors",
+      "size": 501324814,
+      "algorithm": "sha256",
+      "hash": "20678548f420d98d26f11442d3528f8b8c94e57ee046ef93dbb7633da8612ca1",
+      "urls": [
+        "https://modelscope.cn/models/Comfy-Org/SeedVR2/resolve/master/vae/seedvr2_ema_vae_fp16.safetensors",
+        "https://hf-mirror.com/Comfy-Org/SeedVR2/resolve/df48879708206a403d2a61acd55578c2e80fd233/vae/seedvr2_ema_vae_fp16.safetensors",
+        "https://huggingface.co/Comfy-Org/SeedVR2/resolve/df48879708206a403d2a61acd55578c2e80fd233/vae/seedvr2_ema_vae_fp16.safetensors"
+      ]
+    }
+  ]
+}

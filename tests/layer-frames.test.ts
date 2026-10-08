@@ -1,3 +1,4 @@
+import { persistedLegacyJob } from './legacy-reconstruction.js';
 import {test,after} from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -17,7 +18,7 @@ const base=`http://127.0.0.1:${(server.address() as {port:number}).port}`;
 const headers={'Content-Type':'application/json','X-Canvas-Token':TOKEN,'X-Canvas-Bridge':BRIDGE_TOKEN};
 after(()=>{server.closeAllConnections();server.close()});
 async function api(route:string,body?:any,method=body?'POST':'GET',expected=200){
- const r=await fetch(base+route,{method,headers,body:body?JSON.stringify(body):undefined});const data:any=await r.json();assert.equal(r.status,expected,JSON.stringify(data));return data;
+ const r=await fetch(base+route,{method,headers,body:body?JSON.stringify(body):undefined});const data:any=await r.json();assert.equal(r.status,expected,JSON.stringify(data));await persistedLegacyJob(route,data); return data;
 }
 async function png(w:number,h:number,color='#123456'){
  const p=path.join(process.env.LAYER_CANVAS_DATA!,crypto.randomUUID()+'.png');
@@ -42,10 +43,10 @@ test('frames resize without crossing or changing object bounds; support negative
 });
 
 test('generation budget preserves frame and maps negative coordinates with a uniform scale',()=>{
- for(const [width,height] of [[1550,1000],[1551,1000],[1242,2688],[30000,1],[1,30000],[8000,8000],[64,25000],[25000,64]]){
+ for(const [width,height] of [[1500,1000],[1501,1000],[1242,2688],[30000,1],[1,30000],[8000,8000],[64,25000],[25000,64]]){
   const f={x:-72,y:35,width,height}, copy={...f}, p=generationPlan(f);
-  assert(p.size.width*p.size.height<=1550000); assert.deepEqual(f,copy);
-  assert.equal(p.exceedsBudget,width*height>1550000);
+  assert(p.size.width*p.size.height<=1500000); assert.deepEqual(f,copy);
+  assert.equal(p.exceedsBudget,width*height>1500000);
   assert(aspectError(p.size,f)<=.01);
   const [u,v]=generationPoint(f,-200,87);
   assert(Math.abs((u-p.offsetX)/p.scale+f.x+200)<1e-9);

@@ -37,7 +37,7 @@ test('editable SVG text retains multiline layout and declared outline/shadow', (
   assert.match(result, /feDropShadow|feGaussianBlur/);
 });
 
-test('native PSD return preserves matching layer IDs, opinions and annotation bindings', async () => {
+test('PS return rejects a bare PSD without native planning and review', async () => {
   await withApi(async api => {
     const fixture = await psdFixture();
     let doc = await api('/api/document?taskId=review_metadata_task');
@@ -47,12 +47,7 @@ test('native PSD return preserves matching layer IDs, opinions and annotation bi
     image.annotations.push({ id: 'annotation_test', layerId: layer.id, type: 'arrow', points: [2, 3, 4, 5], text: '这一层', color: '#ff0000' });
     doc = await api(`/api/document/${doc.id}`, 'PUT', { document: doc, expectedRevision: doc.revision });
     const job = await api(`/api/document/${doc.id}/jobs`, 'POST', { type: 'photoshop', imageId: image.id });
-    const applied = await api(`/api/jobs/${job.id}/apply`, 'POST', { taskId: doc.taskId, baseVersion: job.version, artifactPath: fixture });
-    const returned = applied.document.images.find((i:any)=>i.id===applied.job.result.imageId);
-    assert.notEqual(returned.id,image.id);assert.equal(returned.parentId,image.id);
-    assert.equal(returned.layers[0].id, layer.id);
-    assert.equal(returned.layers[0].opinion, layer.opinion);
-    assert(returned.annotations.every((a: any) => a.layerId === null || returned.layers.some((l: any) => l.id === a.layerId)));
+    await assert.rejects(()=>api(`/api/jobs/${job.id}/apply`, 'POST', { taskId: doc.taskId, baseVersion: job.version, artifactPath: fixture }));
   });
 });
 
@@ -80,7 +75,7 @@ test('late image commit preserves concurrent other-image edits and rejects cance
     doc = await api(`/api/document/${doc.id}/import-path`, 'POST', { taskId: doc.taskId, path: fixture });
     doc = await api(`/api/document/${doc.id}/import-path`, 'POST', { taskId: doc.taskId, path: fixture });
     const target = structuredClone(doc.images[0]);
-    const job = await api(`/api/document/${doc.id}/jobs`, 'POST', { type: 'revise', imageId: target.id });
+    const job = await api(`/api/document/${doc.id}/jobs`, 'POST', { type: 'revise', imageId: target.id, layerIds: [target.layers[0].id] });
     doc.images[1].opinion = '并发编辑另一个图片';
     doc.images[0].x = 987;
     doc.layout.opinionsWidth = 450;
@@ -96,17 +91,13 @@ test('late image commit preserves concurrent other-image edits and rejects cance
   });
 });
 
-test('PSD roundtrip preserves native group opacity and blend mode', async () => {
-  await withApi(async api => {
-    const fixture = await psdFixture(true);
-    let doc = await api('/api/document?taskId=review_group_task');
-    doc = await api(`/api/document/${doc.id}/import-path`, 'POST', { taskId: doc.taskId, path: fixture });
-    const { exportPsd } = await import('../server/media.js');
-    const roundtrip = readPsd(await exportPsd(doc.id, doc.images[0]), { useImageData: true });
-    assert.equal(roundtrip.children?.[0].name, '原生图层组');
-    assert(Math.abs((roundtrip.children?.[0].opacity ?? 1) - .5) < .01);
-    assert.equal(roundtrip.children?.[0].blendMode, 'multiply');
-  });
+test('ordinary PSD import rejects groups whose blend and opacity cannot be flattened safely', async () => {
+  const fixture = await psdFixture(true);
+  const { importImage } = await import('../server/media.js');
+  const { getByTask } = await import('../server/store.js');
+  const { readFile } = await import('node:fs/promises');
+  const awaitBytes = await readFile(fixture);
+  await assert.rejects(() => importImage(getByTask('review_group_task'), awaitBytes, 'unsafe.psd'), /复杂组/);
 });
 
 async function psdFixture(group = false) {

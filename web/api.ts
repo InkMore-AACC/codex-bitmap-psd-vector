@@ -29,6 +29,28 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
   return response.json();
 }
+// Only initial, read-only loading is retried. Never replay a mutation.
+export async function apiWhenReady<T>(path: string, signal: AbortSignal): Promise<T> {
+  signal = AbortSignal.any([signal, AbortSignal.timeout(30_000)]);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await api<T>(path, { signal });
+    } catch (error) {
+      if (signal.aborted || error instanceof ApiError || attempt >= 29) throw error;
+      await new Promise<void>((resolve, reject) => {
+        const abort = () => {
+          clearTimeout(timer);
+          reject(signal.reason);
+        };
+        const timer = setTimeout(() => {
+          signal.removeEventListener('abort', abort);
+          resolve();
+        }, 1000);
+        signal.addEventListener('abort', abort, { once: true });
+      });
+    }
+  }
+}
 export async function download(path: string, name: string) {
   const response = await fetch(path, {
     headers: { 'X-Canvas-Token': token() },

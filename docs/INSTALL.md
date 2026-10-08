@@ -1,5 +1,7 @@
 # 安装指南（Windows）
 
+SeedVR2 图片/PSD/视频超分是单独安装项：`powershell -ExecutionPolicy Bypass -File scripts/setup-seedvr2.ps1`。需要 NVIDIA CUDA 环境，下载约8.84 GB模型，基础安装不强制下载。详见 [超分安装与参数](UPSCALE.md)。
+
 建议直接让 Codex 按本文安装。用户不需要手工编辑配置文件或理解代码。
 
 ## 1. 准备环境
@@ -27,6 +29,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1
 **如果提示插件创建工具不存在：** 源码和依赖不会因此丢失。让 Codex 检查本地 `plugin-creator` 能力与 CLI 帮助，安装 `plugins/layer-canvas`。不要直接从其他人的电脑复制带绝对路径的 `.mcp.json`。
 
 完成后重新载入插件；若当前对话未发现新工具，可在新对话检查。然后说：**“打开分层画布”**。正式使用时始终在你希望绑定画布的那个对话打开。
+
+插件重新加载后会自动启动后台网页服务，首次打开页面仍使用“打开分层画布”。升级这一功能后需重新加载插件或重启 Codex，使新的 MCP 启动逻辑生效；不需要重装模型。后台启动不进行生图、收费调用或模型权重加载。
 
 ## 3. 添加本地抠图模型（可选）
 
@@ -97,3 +101,5 @@ Photoshop MCP 默认安装在项目的 vendor/photoshop-mcp 内，可用 `-SkipA
 - 自动任务发送仍需桌面端实际提供官方工具与宿主连接环境；缺失时显示失败，不能通过私有协议或独立推理进程冒充已连接。
 - 缺显卡可用 CPU；CUDA/驱动兼容性、显存和内存不足会影响推理。文件下载始终校验，不以禁用校验“解决”网络问题。
 - API Key、Illustrator 密钥必须由各用户自己提供。不会复制开发者密钥、个人画布、素材、字体或软件许可证；缺字体会影响可编辑文字复现。
+
+可选SeedVR2超分：运行`scripts/setup-seedvr2.ps1`，自动安装固定推理核心、7B标准版INT8及VAE。无需另装ComfyUI，详见[超分说明](UPSCALE.md)。

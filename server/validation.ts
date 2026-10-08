@@ -1,5 +1,10 @@
 import { frameSchema } from '../shared/layer-frame.js';
+import { blendModeSchema } from '../shared/blend.js';
+import { nativePsdSchema, photoshopSettingsSchema } from '../shared/photoshop.js';
 import { z } from 'zod';
+import { layerReviewSchema } from '../shared/layer-review.js';
+import { upscaleSchema } from '../shared/upscale.js';
+import { standaloneMattingSchema } from '../shared/standalone-matting.js';
 import { cutoutOptionsSchema, psdModeSchema } from '../shared/cutout.js';
 const finite = z.number().finite();
 const coord = finite.min(-100000).max(100000);
@@ -40,8 +45,11 @@ const imageLayerSchema = z.object({
   height: dimension,
   visible: z.boolean(),
   opacity: finite.min(0).max(1),
+  blendMode: blendModeSchema.optional(),
   opinion: str,
   disposition: z.enum(['keep', 'rebuild']),
+  review: layerReviewSchema.optional(),
+  autoReviewOpinion: str.optional(),
   kind: z.enum(['raster', 'text', 'vector']),
   svg: z.string().max(40000000).optional(),
   text: text.optional(),
@@ -52,6 +60,7 @@ const imageLayerSchema = z.object({
   frame: frameSchema.optional(),
   sourceLayerIds: z.array(id).min(1).max(300).optional(),
   generationSize: z.object({ width: dimension, height: dimension }).optional(),
+  generationId: z.string().optional(),
   generationSourceUrl: url.optional(),
   sourceCrop: z
     .object({
@@ -64,8 +73,10 @@ const imageLayerSchema = z.object({
   generationAdaptation: z
     .object({
       scale: finite.positive(),
-      offsetX: finite.nonnegative(),
-      offsetY: finite.nonnegative(),
+      // Placement can extend left/up beyond the design frame. These are signed
+      // coordinates, not the nonnegative padding offsets from fitGeometry.
+      offsetX: finite,
+      offsetY: finite,
       contentWidth: dimension,
       contentHeight: dimension,
       aspectError: finite.nonnegative(),
@@ -100,6 +111,7 @@ const planningLayerSchema = imageLayerSchema.extend({
 });
 export const layerSchema = z.union([imageLayerSchema, planningLayerSchema]);
 const annotation = z.object({
+  origin: z.literal('auto-review').optional(),
   id,
   layerId: id.nullable(),
   type: z.enum(['arrow', 'ellipse', 'box', 'pen', 'text']),
@@ -119,6 +131,18 @@ const annotation = z.object({
 });
 export const imageSchema = z
   .object({
+    mediaType: z.enum(['image', 'video']).optional(),
+    nativePsd: nativePsdSchema.optional(),
+    video: z
+      .object({
+        duration: finite.positive(),
+        fpsNumerator: finite.int().positive(),
+        fpsDenominator: finite.int().positive(),
+        frameCount: finite.int().positive(),
+        audioStreams: finite.int().nonnegative(),
+        previewUrl: url,
+      })
+      .optional(),
     id,
     name: z.string().max(300),
     width: dimension,
@@ -138,7 +162,7 @@ export const imageSchema = z
       .optional(),
     annotations: z.array(annotation).max(2000),
     opinion: str,
-    status: z.enum(['original', 'preview', 'layered', 'vector']),
+    status: z.enum(['original', 'preview', 'layered', 'vector', 'cutout', 'upscaled']),
     version: z.number().int().nonnegative(),
     vectorUrl: url.optional(),
     psdSource: url.optional(),
@@ -149,6 +173,12 @@ export const imageSchema = z
     artifactUrl: url.optional(),
   })
   .superRefine((image, ctx) => {
+    if (
+      (image.mediaType === 'video') !== !!image.video ||
+      (image.mediaType === 'video' &&
+        (image.layers.length || image.vectorLayers?.length || image.annotations.length))
+    )
+      ctx.addIssue({ code: 'custom', message: '视频必须包含媒体信息，暂不支持图片图层和标注' });
     if (image.layers.some((l) => l.kind === 'plan') && image.status !== 'preview')
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -169,6 +199,9 @@ export const documentSchema = z.object({
       '节点 ID 不可重复',
     ),
   settings: z.object({
+    photoshop: photoshopSettingsSchema.optional(),
+    matting: standaloneMattingSchema.optional(),
+    upscale: upscaleSchema.optional(),
     psdMode: psdModeSchema,
     cutoutOptions: cutoutOptionsSchema.optional(),
     vectorEngine: z.enum(['vectorizerCom', 'recraft', 'vectorizer302', 'vectorizer']),
@@ -195,7 +228,16 @@ export const jobSchema = z.object({
   useOriginal: z.boolean().optional(),
   useVectorLayers: z.boolean().optional(),
   layerIds: z.array(id).max(300).optional(),
-  type: z.enum(['plan', 'layer', 'revise', 'vectorize', 'photoshop', 'illustrator']),
+  type: z.enum([
+    'upscale',
+    'cutout',
+    'plan',
+    'layer',
+    'revise',
+    'vectorize',
+    'photoshop',
+    'illustrator',
+  ]),
   mode: psdModeSchema.optional(),
   engine: z.enum(['vectorizerCom', 'recraft', 'vectorizer302', 'vectorizer']).optional(),
 });

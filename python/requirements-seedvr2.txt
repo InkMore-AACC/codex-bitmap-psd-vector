@@ -1,0 +1,25 @@
+# Headless pinned Comfy core dependencies. No UI, manager or user custom nodes.
+comfy-kitchen==0.2.36
+comfy-aimdo==0.5.5
+torchsde==0.2.6
+transformers>=4.50.3,<5
+safetensors>=0.4.5,<0.8
+einops==0.8.1
+numpy>=1.26,<3
+Pillow>=10,<13
+scipy>=1.11,<2
+requests>=2.31,<3
+pyyaml>=6,<7
+psutil==7.2.2
+sentencepiece==0.2.2
+aiohttp>=3.11.8,<4
+pydantic>=2.7,<3
+pydantic-settings>=2,<3
+av==19.0.0
+imageio-ffmpeg==0.6.0
+simpleeval>=1,<2
+blake3>=1,<2
+kornia>=0.7,<0.9
+spandrel==0.4.2
+sqlalchemy>=2,<3
+alembic>=1,<2

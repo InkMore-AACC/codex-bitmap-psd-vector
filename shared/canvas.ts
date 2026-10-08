@@ -1,5 +1,9 @@
 import type { LayerFrame } from './layer-frame.js';
+import type { PhotoshopSettings, NativePsd } from './photoshop.js';
 import type { CutoutOptions, PsdMode } from './cutout.js';
+import type { LayerReview } from './layer-review.js';
+import type { UpscaleSettings } from './upscale.js';
+import type { StandaloneMatting } from './standalone-matting.js';
 export interface TextLayer {
   value: string;
   fontFamily: string;
@@ -23,8 +27,11 @@ export interface ImageLayer {
   height: number;
   visible: boolean;
   opacity: number;
+  blendMode?: import('./blend.js').BlendMode;
   opinion: string;
   disposition: 'keep' | 'rebuild';
+  review?: LayerReview;
+  autoReviewOpinion?: string;
   kind: 'raster' | 'text' | 'vector';
   svg?: string;
   text?: TextLayer;
@@ -35,6 +42,7 @@ export interface ImageLayer {
   frame?: LayerFrame;
   sourceLayerIds?: string[];
   generationSize?: { width: number; height: number };
+  generationId?: string;
   generationSourceUrl?: string;
   sourceCrop?: { x: number; y: number; width: number; height: number };
   generationAdaptation?: {
@@ -64,6 +72,7 @@ export type PlanningLayer = Omit<
 };
 export type Layer = ImageLayer | PlanningLayer;
 export interface Annotation {
+  origin?: 'auto-review';
   id: string;
   layerId: string | null;
   type: 'arrow' | 'ellipse' | 'box' | 'pen' | 'text';
@@ -79,6 +88,16 @@ export interface Annotation {
 }
 export type VectorEngine = 'vectorizerCom' | 'recraft' | 'vectorizer302' | 'vectorizer';
 export interface CanvasImage {
+  nativePsd?: NativePsd;
+  mediaType?: 'image' | 'video';
+  video?: {
+    duration: number;
+    fpsNumerator: number;
+    fpsDenominator: number;
+    frameCount: number;
+    audioStreams: number;
+    previewUrl: string;
+  };
   id: string;
   name: string;
   width: number;
@@ -91,7 +110,7 @@ export interface CanvasImage {
   vectorLayers?: Layer[];
   annotations: Annotation[];
   opinion: string;
-  status: 'original' | 'preview' | 'layered' | 'vector';
+  status: 'original' | 'preview' | 'layered' | 'vector' | 'cutout' | 'upscaled';
   version: number;
   vectorUrl?: string;
   psdSource?: string;
@@ -107,6 +126,9 @@ export interface Document {
   revision: number;
   images: CanvasImage[];
   settings: {
+    photoshop?: PhotoshopSettings;
+    matting?: StandaloneMatting;
+    upscale?: UpscaleSettings;
     psdMode: PsdMode;
     cutoutOptions?: CutoutOptions;
     vectorEngine: VectorEngine;

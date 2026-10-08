@@ -16,7 +16,8 @@ export type Job = {
   documentId: string;
   taskId: string;
   imageId: string;
-  type: 'plan' | 'layer' | 'revise' | 'vectorize' | 'photoshop' | 'illustrator';
+  type:
+    'upscale' | 'cutout' | 'plan' | 'layer' | 'revise' | 'vectorize' | 'photoshop' | 'illustrator';
   status: 'queued' | 'running' | 'waiting_codex' | 'completed' | 'failed' | 'cancelled';
   message: string;
   createdAt: string;

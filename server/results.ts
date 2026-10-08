@@ -1,3 +1,4 @@
+import { upscaleModelName } from '../shared/upscale.js';
 import type { CanvasImage, Layer, Job } from './types.js';
 import { load, getJob, history, save, uid } from './store.js';
 export function preserveLayerIdentity(before: CanvasImage, layers: Layer[]) {
@@ -26,6 +27,7 @@ export function preserveLayerIdentity(before: CanvasImage, layers: Layer[]) {
 }
 /** All completed outputs branch from the frozen input. Only an unchanged planning node is updated in place. */
 export function commitImage(job: Job, prepared: CanvasImage) {
+  if(job.type!=='photoshop')prepared.nativePsd=undefined;
   const state = getJob(job.id);
   if (state.status === 'cancelled')
     throw Object.assign(new Error('请求已取消，未覆盖画布'), { status: 409 });
@@ -61,6 +63,8 @@ export function commitImage(job: Job, prepared: CanvasImage) {
       source.name.replace(/\.[^.]+$/, '') +
       ' · ' +
       {
+        upscale: upscaleModelName(job.upscale) + ' 超分',
+        cutout: '精细抠图',
         plan: '预分层',
         layer: 'PSD 分层',
         revise: '修改结果',

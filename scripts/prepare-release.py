@@ -10,7 +10,8 @@ ROOT_FILES = ['README.md', 'AGENTS.md', 'CONTRIBUTING.md', 'SECURITY.md', 'CHANG
               '.gitignore', '.gitattributes', '.prettierrc.json', 'package.json', 'package-lock.json',
               'index.html', 'tsconfig.json', 'vite.config.ts']
 DOCS = ['INSTALL', 'USER_GUIDE', 'TROUBLESHOOTING', 'ARCHITECTURE', 'DEVELOPMENT',
-        'THIRD_PARTY', 'REQUIREMENTS', 'CONTRACT', 'ACCEPTANCE', 'RELEASE_CHECKLIST']
+        'THIRD_PARTY', 'REQUIREMENTS', 'CONTRACT', 'ACCEPTANCE', 'RELEASE_CHECKLIST', 'UPSCALE',
+        'PHOTOSHOP_REBUILD', 'RECONSTRUCTION_V3', 'RECONSTRUCTION_V4', 'RECONSTRUCTION_EXPERIMENTS']
 FOLDERS = ['shared', 'server', 'web', 'bridge', 'python', 'scripts', 'plugins', '.github']
 EXTENSIONS = {'.ts', '.tsx', '.css', '.json', '.md', '.py', '.ps1', '.mjs', '.txt', '.yml', '.yaml'}
 EXCLUDED = set()

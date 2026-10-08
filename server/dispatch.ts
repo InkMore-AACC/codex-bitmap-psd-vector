@@ -11,6 +11,7 @@ const listeners = new Map<string, Set<symbol>>();
 const lastSeen = new Map<string, string>();
 const desktopPipes = new Map<string, string>();
 const inFlight = new Map<string, Promise<void>>();
+export const dispatchBusy = () => inFlight.size > 0;
 export function connectDesktop(taskId: string, pipePath?: string) {
   // Only called by the authenticated local MCP bridge, not the browser.
   if (pipePath) {
@@ -36,10 +37,16 @@ export function dispatchStatus(taskId: string) {
   };
 }
 export function needsCodex(j: Job) {
-  return j.mode !== 1 && (j.type !== 'vectorize' || isCodexWeb(j));
+  return (
+    !['cutout', 'upscale'].includes(j.type) &&
+    j.mode !== 1 &&
+    (j.type !== 'vectorize' || isCodexWeb(j))
+  );
 }
 export function dispatchPrompt(j: Job) {
   const names = {
+    upscale: 'SeedVR2 超分',
+    cutout: '独立精细抠图',
     plan: '预分层',
     layer: '真实分层',
     revise: '按标注修改',
@@ -56,8 +63,9 @@ export function dispatchPrompt(j: Job) {
       : '') +
     `插件工具未加载时，技能在 ${path.join(ROOT, 'plugins/layer-canvas/skills/layer-canvas/SKILL.md')}；相同接口可用 ${path.join(ROOT, 'bridge/cli.ts')}，调用方式 node --import tsx bridge/cli.ts <toolName> <arguments.json>（工作目录 ${ROOT}）。不要新建对话、启动另一个推理会话或将排队当作完成。` +
     (j.frameContractVersion
-      ? '\n重建尺寸按 packet.frameContract.version=2：frame 是最终画幅，generation.size 是155万像素以内的生成请求尺寸。回传实际原始文件，服务按实际宽高和1%比例容差等比放大/缩小；不能因实际约157万像素或低于目标尺寸直接判失败。逐层 stageOnly 暂存并检查后再完整提交；合并及总图改尺寸先获取更新后的 generationPlan。'
+      ? '\n重建尺寸按 packet.frameContract.version=2：frame 是最终画幅，generation.size 是150万像素以内的生成请求尺寸。回传实际原始文件，服务按实际宽高和1%比例容差等比放大/缩小；不能因实际约157万像素或低于目标尺寸直接判失败。逐层 stageOnly 暂存并检查后再完整提交；合并及总图改尺寸先获取更新后的 generationPlan。'
       : '') +
+    (j.reconstructionVersion === 3 ? '\n先读RECONSTRUCTION.md，以packet.generationProtocol.version为准。v4普通任务先layout冻结元素归属/排除项/参考点/层间关系，每层prepare、image_gen、register、实际查看并纠正、review、composite后再生成下一层；最终review-composite检查全部关系再回传。PS先合成核对，再按需upscale-material和重新审核。frame与承载文件、placementFrame分开，不能把完整文件再次挤进frame。缺新字段用同项目CLI，不降级、不换SVG。' : '') +
     (j.type === 'plan' && j.mode === 3
       ? '\n本次是 Codex 框规划：只理解干净图片并提交图层名称、box、role、意见和底到顶顺序。严禁调用 image_gen、抠图或生成预览图片；提交规划后停止，等待用户确认。'
       : '')
