@@ -1040,6 +1040,13 @@ select option {
   padding: 12px;
   border-bottom: 1px solid var(--border-faint);
 }
+.jobs-more {
+  display: block;
+  width: 100%;
+  padding: 12px;
+  color: var(--accent);
+  font-size: 11px;
+}
 .job-row > div {
   display: flex;
   justify-content: space-between;

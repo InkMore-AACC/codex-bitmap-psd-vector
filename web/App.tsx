@@ -22,6 +22,7 @@ import ModelStatus from './ModelStatus';
 import { mergeConcurrent, reconcileSaved, retainNativeAssets } from './reconcile';
 import { connectionPath, imagePoint, labelPoint } from './canvasGeometry';
 import { engines } from './vectorProviders';
+import { JOB_HISTORY_PAGE_SIZE, isActiveJob, jobList, jobTiming } from './jobList';
 
 import AdobeSettings from './AdobeSettings';
 import PhotoshopSettings from './PhotoshopSettings';
@@ -150,6 +151,7 @@ export default function App() {
   const [draft, setDraft] = useState<{ imageId: string; item: Annotation } | null>(null);
   const [selectedMarkId, setSelectedMarkId] = useState<string | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [jobHistoryLimit, setJobHistoryLimit] = useState(JOB_HISTORY_PAGE_SIZE);
   const previousJobStates = useRef(new Map<string, Job['status']>());
   const pendingResultFocus = useRef<
     { sourceId: string; imageId: string; mode: 'vector' | 'layers' } | undefined
@@ -201,7 +203,7 @@ export default function App() {
   }, [doc?.id, selectedId]);
   const displayedLayers = image ? layersFor(image) : [];
   const selectedLayer = displayedLayers.find((x) => x.id === layerId);
-  const activeJobs = jobs.filter((j) => ['queued', 'waiting_codex', 'running'].includes(j.status));
+  const { active: activeJobs, visible: visibleJobs, hiddenHistory } = jobList(jobs, jobHistoryLimit);
   const selectedAnnotation = image?.annotations.find(
     (a) => a.id === selectedMarkId && a.layerId === layerId,
   );
@@ -2104,13 +2106,17 @@ export default function App() {
           {!jobs.length ? (
             <p className="empty-jobs">还没有处理任务</p>
           ) : (
-            jobs.slice(0, 30).map((j) => (
+            visibleJobs.map((j) => (
               <div key={j.id} data-job-id={j.id} className={`job-row ${j.status}`}>
                 <div>
                   <b>{jobNames[j.type]}</b>
                   <span>{jobLabel(j)}</span>
                 </div>
                 <p>{j.message || ''}</p>
+                <small>{jobTiming(j)}</small>
+                {j.status === 'running' && j.type === 'upscale' && (
+                  <small>以上为实际执行状态；此任务未提供准确的完成百分比。</small>
+                )}
                 {j.status === 'waiting_codex' && (
                   <small>
                     {j.dispatch?.state === 'sent'
@@ -2131,7 +2137,7 @@ export default function App() {
                 {j.status === 'completed' && j.result?.artifactUrl && (
                   <button onClick={() => void downloadArtifact(j)}>下载产物 ↓</button>
                 )}
-                {['queued', 'running', 'waiting_codex'].includes(j.status) && (
+                {isActiveJob(j) && (
                   <button
                     onClick={async () => {
                       try {
@@ -2149,6 +2155,14 @@ export default function App() {
                 )}
               </div>
             ))
+          )}
+          {hiddenHistory > 0 && (
+            <button
+              className="jobs-more"
+              onClick={() => setJobHistoryLimit((limit) => limit + JOB_HISTORY_PAGE_SIZE)}
+            >
+              显示更早任务（还有 {hiddenHistory} 条）
+            </button>
           )}
         </div>
       )}
